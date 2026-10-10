@@ -18,6 +18,12 @@ Added
 - Added ``motion_anchor_ang_vel_x`` reward
   (``motion_global_anchor_angular_velocity_x_error_exp``) to track
   world-frame x angular velocity of the motion anchor.
+- Added ``convert_omnixtreme`` (``mjlab.scripts.convert_omnixtreme``) to
+  split the long OmniXtreme G1 sequence (``motions/g1_motion_long.npz``,
+  already in mjlab joint order) into per-motion clips at smoothed-energy
+  pauses and write them under ``motions/omnixtreme/``.
+- Added G1 training commands (train loop, checkpoint play, TensorBoard)
+  to the README G1 tracking section.
 
 Fixed
 ^^^^^

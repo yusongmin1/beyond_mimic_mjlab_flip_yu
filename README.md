@@ -179,12 +179,53 @@ Specify a checkpoint explicitly:
 conda activate env_isaaclab
 cd /home/zju/Downloads/mjlab-dev-go2-mimic
 export PYTHONPATH=src
+```
 
+**Train** (4096 envs, 10000 iterations; loop over any motions):
+
+```bash
+for motion in \
+  chunwan/88_05_stageii_unitree_g1 \
+  omnixtreme/g1_motion_long_03
+do
+  echo "========== Training $motion =========="
+  python -m mjlab.scripts.train \
+    Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
+    --env.commands.motion.motion-file "$PWD/motions/${motion}.npz" \
+    --env.scene.num-envs 4096 \
+    --agent.max-iterations 10000 \
+    --agent.run-name "$(basename $motion)"
+done
+```
+
+With state estimation in the actor obs, use task id
+`Mjlab-Tracking-Flat-Unitree-G1` instead.
+
+**Play** (auto-picks name-sorted latest ``model_*.pt``).
+``--keep-randomization True`` keeps training-time DR:
+
+```bash
 python -m mjlab.scripts.play \
   Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
-  --motion-file $PWDmotions/chunwan/90_15_stageii_unitree_g1.npz  \
+  --motion-file $PWD/motions/chunwan/90_15_stageii_unitree_g1.npz  \
   --keep-randomization True \
   --export-torchscript True
+```
+
+Specify a checkpoint explicitly:
+
+```bash
+python -m mjlab.scripts.play \
+  Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
+  --motion-file $PWD/motions/chunwan/90_15_stageii_unitree_g1.npz \
+  --checkpoint-file logs/rsl_rl/g1_tracking/<run>/model_10000.pt \
+  --keep-randomization True
+```
+
+TensorBoard:
+
+```bash
+tensorboard --logdir logs/rsl_rl/g1_tracking
 ```
 
 **Export TorchScript `policy.pt`** (for C++ deploy; training also writes
