@@ -87,6 +87,9 @@ def unitree_go2_flat_tracking_env_cfg(
   # Go2 has no joint torque support — remove tau reward term.
   cfg.rewards.pop("motion_joint_torque", None)
 
+  # Go2 has no head — remove head contact penalty term.
+  cfg.rewards.pop("head_contact", None)
+
   # Go2 has no tau mode — remove tau obs terms.
   cfg.observations["actor"].terms.pop("joint_torque", None)
   cfg.observations["critic"].terms.pop("joint_torque", None)

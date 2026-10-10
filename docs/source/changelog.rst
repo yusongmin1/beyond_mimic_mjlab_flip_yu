@@ -24,6 +24,13 @@ Added
   pauses and write them under ``motions/omnixtreme/``.
 - Added G1 training commands (train loop, checkpoint play, TensorBoard)
   to the README G1 tracking section.
+- Added ``head_contact`` reward (``mdp.head_contact_cost``, weight -5.0):
+  binary penalty when the G1 head sphere touches anything (e.g. ground),
+  via a new ``head_contact`` ContactSensor on ``head_collision``. The term
+  and sensor are removed for Go2 (no head).
+- Enabled 0–3 physics-step actuator position delay for the G1 tracking
+  task by default (``enable_actuator_delay=True``), matching the Go2
+  randomization; auto-disabled in play mode.
 
 Fixed
 ^^^^^

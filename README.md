@@ -186,7 +186,8 @@ export PYTHONPATH=src
 ```bash
 for motion in \
   chunwan/88_05_stageii_unitree_g1 \
-  omnixtreme/g1_motion_long_03
+  omnixtreme/g1_motion_long_01\
+  omnixtreme/g1_motion_long_02
 do
   echo "========== Training $motion =========="
   python -m mjlab.scripts.train \
@@ -431,7 +432,8 @@ do
 done
 For development setup: `uvx pre-commit install`
 ## TODO
-
+- [] 手部接触的力进行限制
+- [] 塑料手的碰撞体拿走
 - [] 手部接触的动作学不好
 - [] 逐渐收紧的终止条件
 - [] 电机力矩转速曲线以及负功率限制(omnixtreme)

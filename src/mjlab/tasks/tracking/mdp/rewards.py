@@ -142,6 +142,12 @@ def self_collision_cost(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tenso
   return sensor.data.found.squeeze(-1)
 
 
+def head_contact_cost(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
+  """Binary cost: 1.0 when the head geom touches anything (ground)."""
+  sensor: ContactSensor = env.scene[sensor_name]
+  assert sensor.data.found is not None
+  return (sensor.data.found.squeeze(-1) > 0.0).float()
+
 def motion_joint_torque_error_exp(
   env: ManagerBasedRlEnv,
   command_name: str,

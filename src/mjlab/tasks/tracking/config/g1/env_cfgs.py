@@ -2,10 +2,12 @@
 
 from typing import Literal
 
+from mjlab.actuator import DelayedActuatorCfg
 from mjlab.asset_zoo.robots import (
   G1_ACTION_SCALE,
   get_g1_robot_cfg,
 )
+from mjlab.entity import EntityArticulationInfoCfg
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg
@@ -22,8 +24,17 @@ def unitree_g1_flat_tracking_env_cfg(
   tau_mode: TauMode = "off",
   tau_filter: TauFilter = "mean",
   play: bool = False,
+  enable_actuator_delay: bool = True,
 ) -> ManagerBasedRlEnvCfg:
-  """Create Unitree G1 flat terrain tracking configuration."""
+  """Create Unitree G1 flat terrain tracking configuration.
+
+  Args:
+    has_state_estimation: Keep privileged state terms in the actor obs.
+    tau_mode: Torque obs/reward mode.
+    tau_filter: Torque sensor window filter.
+    play: Disable episode timeout / DR used during interactive play.
+    enable_actuator_delay: Wrap actuators with 0–3 physics-step delay.
+  """
   if tau_mode not in {"off", "reward", "critic", "actor_critic"}:
     raise ValueError(f"Unsupported tau_mode '{tau_mode}'.")
   if tau_filter not in {"mean", "last"}:
@@ -31,7 +42,23 @@ def unitree_g1_flat_tracking_env_cfg(
 
   cfg = make_tracking_env_cfg()
 
-  cfg.scene.entities = {"robot": get_g1_robot_cfg()}
+  robot_cfg = get_g1_robot_cfg()
+  if enable_actuator_delay and not play:
+    articulation = robot_cfg.articulation
+    assert articulation is not None
+    robot_cfg.articulation = EntityArticulationInfoCfg(
+      actuators=tuple(
+        DelayedActuatorCfg(
+          base_cfg=act,
+          delay_target="position",
+          delay_min_lag=0,
+          delay_max_lag=3,
+        )
+        for act in articulation.actuators
+      ),
+      soft_joint_pos_limit_factor=articulation.soft_joint_pos_limit_factor,
+    )
+  cfg.scene.entities = {"robot": robot_cfg}
 
   self_collision_cfg = ContactSensorCfg(
     name="self_collision",
@@ -41,7 +68,14 @@ def unitree_g1_flat_tracking_env_cfg(
     reduce="none",
     num_slots=1,
   )
-  scene_sensors = [self_collision_cfg]
+  head_contact_cfg = ContactSensorCfg(
+    name="head_contact",
+    primary=ContactMatch(mode="geom", pattern="head_collision", entity="robot"),
+    fields=("found",),
+    reduce="none",
+    num_slots=1,
+  )
+  scene_sensors = [self_collision_cfg, head_contact_cfg]
   if tau_mode != "off":
     scene_sensors.append(
       JointTorqueSensorCfg(

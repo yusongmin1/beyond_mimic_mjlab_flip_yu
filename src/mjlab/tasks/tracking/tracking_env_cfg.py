@@ -322,6 +322,13 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
       weight=-10.0,
       params={"sensor_name": "self_collision"},
     ),
+    # Head-ground contact penalty. Requires a "head_contact" ContactSensor,
+    # registered per-robot (G1 has one; Go2 has no head → term removed).
+    "head_contact": RewardTermCfg(
+      func=mdp.head_contact_cost,
+      weight=-5.0,
+      params={"sensor_name": "head_contact"},
+    ),
   }
 
   ##
