@@ -80,42 +80,46 @@ go to `logs/rsl_rl/go2_tracking/`.
 #### Demo Videos
 
 Learned Go2 skills (files under [`videos/`](videos/)).
-Cells use equal ``width="25%"`` so GitHub's attachment player does not
-stretch one column.
+Two videos per row (50/50) so GitHub's player does not stretch a middle
+column.
 
 <table width="100%">
   <tr>
-    <td width="25%" align="center" valign="top">
-      <video src="https://github.com/user-attachments/assets/800a0da9-42c4-4cb2-a20b-dcb2e0fa96f7" controls width="200" height="356"></video>
+    <td width="50%" align="center" valign="top">
+      <video src="https://github.com/user-attachments/assets/800a0da9-42c4-4cb2-a20b-dcb2e0fa96f7" controls width="240" height="427"></video>
       <br />Backflip
     </td>
-    <td width="25%" align="center" valign="top">
-      <video src="https://github.com/user-attachments/assets/39d54ec3-1454-4242-8abe-e9e5388f7281" controls width="200" height="356"></video>
+    <td width="50%" align="center" valign="top">
+      <video src="https://github.com/user-attachments/assets/39d54ec3-1454-4242-8abe-e9e5388f7281" controls width="240" height="427"></video>
       <br />Front flip
     </td>
-    <td width="25%" align="center" valign="top">
-      <video src="https://github.com/user-attachments/assets/a7419df5-61e3-4dad-9d27-cb5a811a656c" controls width="200" height="356"></video>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <video src="https://github.com/user-attachments/assets/a7419df5-61e3-4dad-9d27-cb5a811a656c" controls width="240" height="427"></video>
       <br />Left flip
     </td>
-    <td width="25%" align="center" valign="top">
-      <video src="https://github.com/user-attachments/assets/8e613766-5154-401c-acf8-30e16f4333f2" controls width="200" height="356"></video>
+    <td width="50%" align="center" valign="top">
+      <video src="https://github.com/user-attachments/assets/8e613766-5154-401c-acf8-30e16f4333f2" controls width="240" height="427"></video>
       <br />Right flip
     </td>
   </tr>
   <tr>
-    <td width="25%" align="center" valign="top">
-      <video src="https://github.com/user-attachments/assets/e52d7050-4e29-4154-b262-4362de74b10c" controls width="200" height="356"></video>
+    <td width="50%" align="center" valign="top">
+      <video src="https://github.com/user-attachments/assets/e52d7050-4e29-4154-b262-4362de74b10c" controls width="240" height="427"></video>
       <br />Jump up
     </td>
-    <td width="25%" align="center" valign="top">
-      <video src="https://github.com/user-attachments/assets/6671fdd5-c6d3-4ec1-9518-9cd5b92cce30" controls width="200" height="356"></video>
+    <td width="50%" align="center" valign="top">
+      <video src="https://github.com/user-attachments/assets/6671fdd5-c6d3-4ec1-9518-9cd5b92cce30" controls width="240" height="427"></video>
       <br />Jump forward
     </td>
-    <td width="25%" align="center" valign="top">
-      <video src="https://github.com/user-attachments/assets/a85a9024-c823-4b3a-ad54-ea8cc9d7476c" controls width="200" height="356"></video>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <video src="https://github.com/user-attachments/assets/a85a9024-c823-4b3a-ad54-ea8cc9d7476c" controls width="240" height="427"></video>
       <br />Jump back
     </td>
-    <td width="25%"></td>
+    <td width="50%"></td>
   </tr>
 </table>
 
@@ -161,19 +165,24 @@ uv run play-go2-rand --motion-file $PWD/motions/go2_longjump_m0p5.npz
 Specify a checkpoint explicitly:
 
 ```bash
-uv run python -m mjlab.scripts.play \
+
+ python -m mjlab.scripts.play \
   Mjlab-Tracking-Flat-Unitree-Go2-No-State-Estimation \
   --motion-file $PWD/motions/go2_longjump_m0p5.npz \
   --checkpoint-file logs/rsl_rl/go2_tracking/<run>/model_10000.pt \
   --keep-randomization True
 ```
 
-G1 example:
+### G1 tracking:
 
 ```bash
-uv run python -m mjlab.scripts.play \
+conda activate env_isaaclab
+cd /home/zju/Downloads/mjlab-dev-go2-mimic
+export PYTHONPATH=src
+
+python -m mjlab.scripts.play \
   Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
-  --motion-file $PWD/motions/g1_fallandgetup1_850_940.npz \
+  --motion-file $PWDmotions/chunwan/90_15_stageii_unitree_g1.npz  \
   --keep-randomization True \
   --export-torchscript True
 ```
@@ -199,6 +208,59 @@ TensorBoard:
 
 ```bash
 tensorboard --logdir logs/rsl_rl/go2_tracking
+```
+
+#### Domain Randomization (Go2 vs G1)
+
+Tracking inherits the randomization set from `tracking_env_cfg.py`; the Go2 /
+G1 task configs only retarget per-robot names or toggle extras. Both robots
+share: interval velocity push, startup COM / body-mass / PD-gain /
+encoder-bias / foot-friction randomization, plus motion initial-state (RSI)
+pose / velocity / joint-position ranges, actor obs noise, and delayed
+actuators where noted.
+
+| Randomization | Mode | Value / Range | Go2 | G1 |
+| :--- | :---: | :--- | :---: | :---: |
+| Velocity push `push_robot` | interval 1–3 s | lin ±0.5/±0.5/±0.2 m/s, ang ±0.52/±0.52/±0.78 rad/s | ✓ | ✓ |
+| Vertical push `push_robot_2` (opt.) | interval 1–2 s | z 0–3 m/s, prob 0.8→0 decay | opt. | opt. |
+| COM shift `base_com` | startup | ±0.025/±0.03/±0.03 m on `trunk` / `torso_link` | ✓ | ✓ |
+| Body mass `add_body_mass` | startup | add −1.0…+2.0 kg on `trunk` / `torso_link` | ✓ | ✓ |
+| PD gains `actuator_gains` | startup | kp, kd ×0.9–1.1 | ✓ | ✓ |
+| Encoder bias | startup | ±0.015 rad | ✓ | ✓ |
+| Foot friction | startup | ×0.3–1.2, shared across feet (`[FR][LR]_foot` / `^(left|right)_foot[1-7]`) | ✓ | ✓ |
+| Actuator delay | startup wrap | position delay 0–3 physics steps | ✓ (flag) | — |
+| RSI pose range | reset | x,y ±0.05 m; z ±0.01 m; roll/pitch ±0.1, yaw ±0.2 rad | ✓ | ✓ |
+| RSI velocity range | reset | same as push range | ✓ | ✓ |
+| RSI joint pos | reset | ±0.1 rad | ✓ | ✓ |
+| Obs noise (actor) | per step | anchor pos ±0.25, ori ±0.05, lin vel ±0.5, ang vel ±0.2, joint pos ±0.01, joint vel ±0.5 | ✓ | ✓ |
+
+Play mode removes pushes and RSI ranges; `--keep-randomization True` keeps
+training-time DR at play (Go2).
+
+#### Render G1 motions to MP4
+
+Render any G1 motion `.npz` under `motions/` (mimickit / chunwan /
+amass_hard) to MP4 with MuJoCo offscreen rendering (chase camera follows
+the root; non-29-joint clips are skipped automatically):
+
+```bash
+cd /path/to/mjlab-dev-go2-mimic
+conda activate env_isaaclab
+export PYTHONPATH=src MUJOCO_GL=egl
+
+# All G1 motions → videos/g1_motions/ (mirrors motions/ layout, 1280x720)
+python -m mjlab.scripts.render_g1_motions \
+  --input-dir motions \
+  --output-dir videos/g1_motions \
+  --width 1280 --height 720
+
+# Single clip / subset via glob pattern
+python -m mjlab.scripts.render_g1_motions \
+  --pattern 'chunwan/88_05*.npz' \
+  --output-dir videos/g1_motions
+
+# Options: --every-nth 2 (halve fps), --follow False (fixed "track" camera),
+# --skip-existing False (re-render)
 ```
 
 ### 4. Sanity-check with Dummy Agents
@@ -308,9 +370,32 @@ make test-fast     # Skip slow tests
 make format        # Format and lint
 make docs          # Build docs locally
 ```
-
+conda activate env_isaaclab
+cd /home/zju/Downloads/mjlab-dev-go2-mimic
+export PYTHONPATH=src MUJOCO_GL=egl
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH:-}"
+for motion in \
+    88_06_stageii_unitree_g1 \
+  90_08_stageii_unitree_g1 \
+  90_15_stageii_unitree_g1
+do
+  echo "========== Training $motion =========="
+  python -m mjlab.scripts.train \
+    Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
+    --env.commands.motion.motion-file "$PWD/motions/chunwan/${motion}.npz" \
+    --env.scene.num-envs 4096 \
+    --agent.max-iterations 10000 \
+    --agent.run-name "chunwan_${motion}" \
+    --gpu-ids '[0]'
+done
 For development setup: `uvx pre-commit install`
+## TODO
 
+- [] 倒地恢复的力课程
+- [] 逐渐收紧的终止条件
+- [] 电机力矩转速曲线以及负功率限制(omnixtreme)
+- [] 添加后空翻等极限动作
+- [] 查尔斯顿舞的长序列动作(3min) 
 ## Citation
 
 If you use mjlab in your research, please cite:

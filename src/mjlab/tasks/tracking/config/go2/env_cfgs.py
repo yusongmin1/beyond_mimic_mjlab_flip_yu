@@ -95,6 +95,7 @@ def unitree_go2_flat_tracking_env_cfg(
     "asset_cfg"
   ].geom_names = r"^[FR][LR]_foot_collision$"
   cfg.events["base_com"].params["asset_cfg"].body_names = ("trunk",)
+  cfg.events["add_body_mass"].params["asset_cfg"].body_names = ("trunk",)
 
   if not enable_body_mass_rand or play:
     cfg.events.pop("add_body_mass", None)

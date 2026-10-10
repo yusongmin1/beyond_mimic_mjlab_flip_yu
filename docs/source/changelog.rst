@@ -8,9 +8,32 @@ Upcoming version (not yet released)
 Added
 ^^^^^
 
+- Added ``render_g1_motions`` (``mjlab.scripts.render_g1_motions``) to
+  batch-render G1 motion ``.npz`` files under ``motions/`` to MP4 videos
+  with MuJoCo offscreen rendering (chase camera, configurable size/fps,
+  ground plane at z=0 for foot-clearance visualization).
+- Added ``convert_chunwan`` (``mjlab.scripts.convert_chunwan``) to batch
+  convert chunwan-flip G1 CSVs (SDK joint order, 36 cols, 30 fps) to mjlab
+  ``.npz`` motions at 50 fps under ``motions/chunwan/``.
 - Added ``motion_anchor_ang_vel_x`` reward
   (``motion_global_anchor_angular_velocity_x_error_exp``) to track
   world-frame x angular velocity of the motion anchor.
+
+Fixed
+^^^^^
+
+- Fixed ``convert_chunwan`` resample ratio (input/output was inverted),
+  which made 30 fps→50 fps clips ~40% too short. Re-converted
+  ``motions/chunwan/`` and re-rendered ``videos/g1_motions/chunwan/``.
+- Fixed chunwan clips hovering above the ground (constant z offset from
+  GMR retargeting, up to 0.17 m on 90_14/90_15): ``convert_chunwan`` now
+  grounds the root trajectory via a robust contact-frame baseline (mean
+  lowest-foot height over contact frames, falling back to the global min
+  for airborne clips), aligned to the true sole height (0.0353 m below
+  the ankle-roll body origin).
+- Fixed G1 tracking startup crash: ``add_body_mass`` hardcoded Go2's
+  ``trunk`` body in the base config; body names are now set per-robot
+  (``trunk`` for Go2, ``torso_link`` for G1).
 - Added a dedicated VS Code task for ``mjlab.scripts.convert_gc_go2`` with
   prompts for CSV path, FPS, device selection, optional line range, and video
   rendering.
