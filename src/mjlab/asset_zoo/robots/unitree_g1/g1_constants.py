@@ -5,12 +5,9 @@ from pathlib import Path
 import mujoco
 
 from mjlab import MJLAB_SRC_PATH
-from mjlab.actuator import BuiltinPositionActuatorCfg
+from mjlab.actuator import UnitreeActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
-from mjlab.utils.actuator import (
-  ElectricActuator,
-  reflected_inertia_from_two_stage_planetary,
-)
+from mjlab.utils.actuator import reflected_inertia_from_two_stage_planetary
 from mjlab.utils.os import update_assets
 from mjlab.utils.spec_config import CollisionCfg
 
@@ -40,7 +37,8 @@ def get_spec() -> mujoco.MjSpec:
 # Actuator config.
 ##
 
-# Motor specs (from Unitree).
+# Rotor inertias / gears for the two-stage planetary gearboxes.
+# Reflected (rotor) inertia at the joint: J2 + J1*i2^2 + Jr*(i1*i2)^2.
 ROTOR_INERTIAS_5020 = (
   0.139e-4,
   0.017e-4,
@@ -97,26 +95,22 @@ ARMATURE_4010 = reflected_inertia_from_two_stage_planetary(
   ROTOR_INERTIAS_4010, GEARS_4010
 )
 
-ACTUATOR_5020 = ElectricActuator(
-  reflected_inertia=ARMATURE_5020,
-  velocity_limit=37.0,
-  effort_limit=25.0,
-)
-ACTUATOR_7520_14 = ElectricActuator(
-  reflected_inertia=ARMATURE_7520_14,
-  velocity_limit=32.0,
-  effort_limit=88.0,
-)
-ACTUATOR_7520_22 = ElectricActuator(
-  reflected_inertia=ARMATURE_7520_22,
-  velocity_limit=20.0,
-  effort_limit=139.0,
-)
-ACTUATOR_4010 = ElectricActuator(
-  reflected_inertia=ARMATURE_4010,
-  velocity_limit=22.0,
-  effort_limit=5.0,
-)
+##
+# Torque-speed envelope presets (from unitree_rl_lab ``unitree_actuators.py``).
+# Trapezoid: full peak torque up to x1, then linear taper to zero at x2.
+# y1: peak torque with torque and speed in the same direction (driving).
+# y2: peak torque with torque and speed in opposite directions (braking).
+# fs/fd: static/dynamic joint friction; va: friction activation velocity.
+##
+
+ENVELOPE_N7520_22P5 = (14.5, 22.7, 111.0, 131.0)
+ENVELOPE_N7520_22P5_FRICTION = (2.4, 0.24)
+ENVELOPE_N7520_14P3 = (22.63, 35.52, 71.0, 83.3)
+ENVELOPE_N7520_14P3_FRICTION = (1.6, 0.16)
+ENVELOPE_N5020_16 = (30.86, 40.13, 24.8, 31.9)
+ENVELOPE_N5020_16_FRICTION = (0.6, 0.06)
+ENVELOPE_W4010_25 = (15.3, 24.76, 4.8, 8.6)
+ENVELOPE_W4010_25_FRICTION = (0.6, 0.06)
 
 NATURAL_FREQ = 10 * 2.0 * 3.1415926535  # 10Hz
 DAMPING_RATIO = 2.0
@@ -131,7 +125,51 @@ DAMPING_7520_14 = 2.0 * DAMPING_RATIO * ARMATURE_7520_14 * NATURAL_FREQ
 DAMPING_7520_22 = 2.0 * DAMPING_RATIO * ARMATURE_7520_22 * NATURAL_FREQ
 DAMPING_4010 = 2.0 * DAMPING_RATIO * ARMATURE_4010 * NATURAL_FREQ
 
-G1_ACTUATOR_5020 = BuiltinPositionActuatorCfg(
+
+def _unitree_actuator_cfg(
+  envelope: tuple[float, float, float, float],
+  friction: tuple[float, float],
+  *,
+  target_names_expr: tuple[str, ...],
+  armature: float,
+  stiffness: float,
+  damping: float,
+  torque_scale: float = 1.0,
+) -> UnitreeActuatorCfg:
+  """Build a UnitreeActuatorCfg from a motor envelope preset.
+
+  Args:
+    envelope: (x1, x2, y1, y2) trapezoid corners, rad/s and N·m.
+    friction: (fs, fd) static/dynamic friction coefficients.
+    target_names_expr: Joints driven by this motor group.
+    armature: Reflected rotor inertia set on the joints.
+    stiffness: PD proportional gain.
+    damping: PD derivative gain.
+    torque_scale: Scale on torque-class params for parallel motor pairs
+      (e.g. 2× N5020 on waist pitch/roll and ankles); x1/x2 are unchanged
+      since parallel motors share the same speed range.
+  """
+  x1, x2, y1, y2 = envelope
+  fs, fd = friction
+  return UnitreeActuatorCfg(
+    target_names_expr=target_names_expr,
+    stiffness=stiffness,
+    damping=damping,
+    # MuJoCo-side safety net; the runtime envelope is the real limit.
+    effort_limit=y2 * torque_scale,
+    armature=armature,
+    x1=x1,
+    x2=x2,
+    y1=y1 * torque_scale,
+    y2=y2 * torque_scale,
+    fs=fs * torque_scale,
+    fd=fd * torque_scale,
+  )
+
+
+G1_ACTUATOR_5020 = _unitree_actuator_cfg(
+  ENVELOPE_N5020_16,
+  ENVELOPE_N5020_16_FRICTION,
   target_names_expr=(
     ".*_elbow_joint",
     ".*_shoulder_pitch_joint",
@@ -139,31 +177,33 @@ G1_ACTUATOR_5020 = BuiltinPositionActuatorCfg(
     ".*_shoulder_yaw_joint",
     ".*_wrist_roll_joint",
   ),
+  armature=ARMATURE_5020,
   stiffness=STIFFNESS_5020,
   damping=DAMPING_5020,
-  effort_limit=ACTUATOR_5020.effort_limit,
-  armature=ACTUATOR_5020.reflected_inertia,
 )
-G1_ACTUATOR_7520_14 = BuiltinPositionActuatorCfg(
+G1_ACTUATOR_7520_14 = _unitree_actuator_cfg(
+  ENVELOPE_N7520_14P3,
+  ENVELOPE_N7520_14P3_FRICTION,
   target_names_expr=(".*_hip_pitch_joint", ".*_hip_yaw_joint", "waist_yaw_joint"),
+  armature=ARMATURE_7520_14,
   stiffness=STIFFNESS_7520_14,
   damping=DAMPING_7520_14,
-  effort_limit=ACTUATOR_7520_14.effort_limit,
-  armature=ACTUATOR_7520_14.reflected_inertia,
 )
-G1_ACTUATOR_7520_22 = BuiltinPositionActuatorCfg(
+G1_ACTUATOR_7520_22 = _unitree_actuator_cfg(
+  ENVELOPE_N7520_22P5,
+  ENVELOPE_N7520_22P5_FRICTION,
   target_names_expr=(".*_hip_roll_joint", ".*_knee_joint"),
+  armature=ARMATURE_7520_22,
   stiffness=STIFFNESS_7520_22,
   damping=DAMPING_7520_22,
-  effort_limit=ACTUATOR_7520_22.effort_limit,
-  armature=ACTUATOR_7520_22.reflected_inertia,
 )
-G1_ACTUATOR_4010 = BuiltinPositionActuatorCfg(
+G1_ACTUATOR_4010 = _unitree_actuator_cfg(
+  ENVELOPE_W4010_25,
+  ENVELOPE_W4010_25_FRICTION,
   target_names_expr=(".*_wrist_pitch_joint", ".*_wrist_yaw_joint"),
+  armature=ARMATURE_4010,
   stiffness=STIFFNESS_4010,
   damping=DAMPING_4010,
-  effort_limit=ACTUATOR_4010.effort_limit,
-  armature=ACTUATOR_4010.reflected_inertia,
 )
 
 # Waist pitch/roll and ankles are 4-bar linkages with 2 5020 actuators.
@@ -171,19 +211,24 @@ G1_ACTUATOR_4010 = BuiltinPositionActuatorCfg(
 # is configuration dependent. Since the exact geometry of the linkage is unknown, we
 # assume a nominal 1:1 gear ratio. Under this assumption, the joint armature in the
 # nominal configuration is approximated as the sum of the 2 actuators' armatures.
-G1_ACTUATOR_WAIST = BuiltinPositionActuatorCfg(
+# Torque-class envelope params (y1/y2/fs/fd) scale by 2; x1/x2 are unchanged.
+G1_ACTUATOR_WAIST = _unitree_actuator_cfg(
+  ENVELOPE_N5020_16,
+  ENVELOPE_N5020_16_FRICTION,
   target_names_expr=("waist_pitch_joint", "waist_roll_joint"),
+  armature=ARMATURE_5020 * 2,
   stiffness=STIFFNESS_5020 * 2,
   damping=DAMPING_5020 * 2,
-  effort_limit=ACTUATOR_5020.effort_limit * 2,
-  armature=ACTUATOR_5020.reflected_inertia * 2,
+  torque_scale=2.0,
 )
-G1_ACTUATOR_ANKLE = BuiltinPositionActuatorCfg(
+G1_ACTUATOR_ANKLE = _unitree_actuator_cfg(
+  ENVELOPE_N5020_16,
+  ENVELOPE_N5020_16_FRICTION,
   target_names_expr=(".*_ankle_pitch_joint", ".*_ankle_roll_joint"),
+  armature=ARMATURE_5020 * 2,
   stiffness=STIFFNESS_5020 * 2,
   damping=DAMPING_5020 * 2,
-  effort_limit=ACTUATOR_5020.effort_limit * 2,
-  armature=ACTUATOR_5020.reflected_inertia * 2,
+  torque_scale=2.0,
 )
 
 ##
@@ -286,8 +331,8 @@ def get_g1_robot_cfg() -> EntityCfg:
 
 G1_ACTION_SCALE: dict[str, float] = {}
 for a in G1_ARTICULATION.actuators:
-  assert isinstance(a, BuiltinPositionActuatorCfg)
-  e = a.effort_limit
+  assert isinstance(a, UnitreeActuatorCfg)
+  e = a.effort_limit  # Envelope braking peak y2 (incl. parallel-motor scale).
   s = a.stiffness
   names = a.target_names_expr
   assert e is not None

@@ -435,12 +435,14 @@ done
 <!-- For development setup: `uvx pre-commit install` -->
 ## TODO
 - [] 手部接触的力进行限制
-- [] 塑料手的碰撞体拿走
-- [] 手部接触的动作学不好
+- [] 塑料手的碰撞体去掉
+- [x] 手部接触的动作学不好
 - [] 逐渐收紧的终止条件
-- [] 电机力矩转速曲线以及负功率限制(omnixtreme)
+- [x] 电机力矩转速曲线的梯形包络
+- [] 负功率限制(omnixtreme)
 - [x] 添加后空翻等极限动作
 - [] 查尔斯顿舞的长序列动作(3min) 倒地恢复的力课程
+- [] 统一的奖励系数
 ## Citation
 
 If you use mjlab in your research, please cite:

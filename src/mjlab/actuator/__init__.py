@@ -38,6 +38,11 @@ from mjlab.actuator.learned_actuator import (
 )
 from mjlab.actuator.pd_actuator import IdealPdActuator as IdealPdActuator
 from mjlab.actuator.pd_actuator import IdealPdActuatorCfg as IdealPdActuatorCfg
+from mjlab.actuator.unitree_actuator import TorqueSpeedEnvelope as TorqueSpeedEnvelope
+from mjlab.actuator.unitree_actuator import UnitreeActuator as UnitreeActuator
+from mjlab.actuator.unitree_actuator import (
+  UnitreeActuatorCfg as UnitreeActuatorCfg,
+)
 from mjlab.actuator.xml_actuator import XmlMotorActuator as XmlMotorActuator
 from mjlab.actuator.xml_actuator import XmlMotorActuatorCfg as XmlMotorActuatorCfg
 from mjlab.actuator.xml_actuator import XmlMuscleActuator as XmlMuscleActuator
