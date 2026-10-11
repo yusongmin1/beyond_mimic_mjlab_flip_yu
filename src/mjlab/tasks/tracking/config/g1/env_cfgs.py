@@ -14,6 +14,7 @@ from mjlab.managers.observation_manager import ObservationGroupCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg, JointTorqueSensorCfg
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
+from mjlab.tasks.tracking.tracking_env_cfg_dance import make_dance_env_cfg
 
 TauMode = Literal["off", "reward", "critic", "actor_critic"]
 TauFilter = Literal["mean", "last"]
@@ -35,12 +36,53 @@ def unitree_g1_flat_tracking_env_cfg(
     play: Disable episode timeout / DR used during interactive play.
     enable_actuator_delay: Wrap actuators with 0–3 physics-step delay.
   """
+  cfg = make_tracking_env_cfg()
+  return _apply_g1_overrides(
+    cfg,
+    has_state_estimation=has_state_estimation,
+    tau_mode=tau_mode,
+    tau_filter=tau_filter,
+    play=play,
+    enable_actuator_delay=enable_actuator_delay,
+  )
+
+
+def unitree_g1_flat_dance_env_cfg(
+  has_state_estimation: bool = True,
+  tau_mode: TauMode = "off",
+  tau_filter: TauFilter = "mean",
+  play: bool = False,
+  enable_actuator_delay: bool = True,
+) -> ManagerBasedRlEnvCfg:
+  """Create Unitree G1 dance tracking configuration.
+
+  Same G1 overrides as the tracking task, but built on the dance base
+  config (tracking_env_cfg_dance.py) with its relaxed anchor rewards.
+  """
+  cfg = make_dance_env_cfg()
+  return _apply_g1_overrides(
+    cfg,
+    has_state_estimation=has_state_estimation,
+    tau_mode=tau_mode,
+    tau_filter=tau_filter,
+    play=play,
+    enable_actuator_delay=enable_actuator_delay,
+  )
+
+
+def _apply_g1_overrides(
+  cfg: ManagerBasedRlEnvCfg,
+  has_state_estimation: bool,
+  tau_mode: TauMode,
+  tau_filter: TauFilter,
+  play: bool,
+  enable_actuator_delay: bool,
+) -> ManagerBasedRlEnvCfg:
+  """Apply Unitree G1 robot-specific overrides to a tracking base config."""
   if tau_mode not in {"off", "reward", "critic", "actor_critic"}:
     raise ValueError(f"Unsupported tau_mode '{tau_mode}'.")
   if tau_filter not in {"mean", "last"}:
     raise ValueError(f"Unsupported tau_filter '{tau_filter}'.")
-
-  cfg = make_tracking_env_cfg()
 
   robot_cfg = get_g1_robot_cfg()
   if enable_actuator_delay and not play:

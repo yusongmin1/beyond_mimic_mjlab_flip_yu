@@ -412,14 +412,15 @@ make test-fast     # Skip slow tests
 make format        # Format and lint
 make docs          # Build docs locally
 ```
+```bash
 conda activate env_isaaclab
 cd /home/zju/Downloads/mjlab-dev-go2-mimic
 export PYTHONPATH=src MUJOCO_GL=egl
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH:-}"
 for motion in \
     88_06_stageii_unitree_g1 \
-  90_08_stageii_unitree_g1 \
-  90_15_stageii_unitree_g1
+    90_08_stageii_unitree_g1 \
+    90_15_stageii_unitree_g1
 do
   echo "========== Training $motion =========="
   python -m mjlab.scripts.train \
@@ -430,7 +431,8 @@ do
     --agent.run-name "chunwan_${motion}" \
     --gpu-ids '[0]'
 done
-For development setup: `uvx pre-commit install`
+```
+<!-- For development setup: `uvx pre-commit install` -->
 ## TODO
 - [] 手部接触的力进行限制
 - [] 塑料手的碰撞体拿走

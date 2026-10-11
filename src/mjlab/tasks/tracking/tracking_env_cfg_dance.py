@@ -1,6 +1,5 @@
-"""Motion mimic task configuration.
+"""Motion mimic task configuration (dance variant).
 
-This module defines the base configuration for motion mimic tasks.
 Robot-specific configurations are located in the config/ directory.
 
 This is a re-implementation of BeyondMimic (https://beyondmimic.github.io/).
@@ -36,8 +35,8 @@ VELOCITY_RANGE = {
 }
 
 
-def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
-  """Create base tracking task configuration."""
+def make_dance_env_cfg() -> ManagerBasedRlEnvCfg:
+  """Create base dance tracking task configuration."""
 
   ##
   # Observations
@@ -199,7 +198,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
       mode="startup",
       func=mdp.randomize_body_mass,
       params={
-        "asset_cfg": SceneEntityCfg("robot", body_names=("trunk")),#"trunk",
+        "asset_cfg": SceneEntityCfg("robot", body_names=()),  # Set per-robot.
         "mass_range": (-1.0, 2.0),
         "operation": "add",
       },
@@ -243,7 +242,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
   rewards: dict[str, RewardTermCfg] = {
     "motion_global_root_pos": RewardTermCfg(
       func=mdp.motion_global_anchor_position_error_exp,
-      weight=1.5,
+      weight=1.0,
       params={"command_name": "motion", "std": 0.3},
     ),
     "motion_global_root_ori": RewardTermCfg(
@@ -263,7 +262,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "motion_body_lin_vel": RewardTermCfg(
       func=mdp.motion_global_body_linear_velocity_error_exp,
-      weight=3.0,
+      weight=1.0,
       params={"command_name": "motion", "std": 2.0},
     ),
     "motion_body_ang_vel": RewardTermCfg(
@@ -303,7 +302,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
     "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
     "anchor_pos": TerminationTermCfg(
       func=mdp.bad_anchor_pos_z_only,
-      params={"command_name": "motion", "threshold": 1.0},
+      params={"command_name": "motion", "threshold": 0.5},
     ),
     "anchor_ori": TerminationTermCfg(
       func=mdp.bad_anchor_ori,
@@ -317,7 +316,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.bad_motion_body_pos_z_only,
       params={
         "command_name": "motion",
-        "threshold": 1.0,
+        "threshold": 0.5,
         "body_names": (),  # Set per-robot.
       },
     ),
