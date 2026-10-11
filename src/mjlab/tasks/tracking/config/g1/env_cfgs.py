@@ -11,6 +11,8 @@ from mjlab.entity import EntityArticulationInfoCfg
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg
+from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg, JointTorqueSensorCfg
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
@@ -182,6 +184,21 @@ def _apply_g1_overrides(
   ].geom_names = r"^(left|right)_foot[1-7]_collision$"
   cfg.events["base_com"].params["asset_cfg"].body_names = ("torso_link",)
   cfg.events["add_body_mass"].params["asset_cfg"].body_names = ("torso_link",)
+
+  # OmniXtreme power-safety regularization (paper eq. 3 / appendix V-K):
+  # penalize regenerative braking power at the knees beyond a 150 W deadband,
+  # normalized by 500, weight -10. Knees only — they take the largest
+  # braking loads during impacts (e.g. backflip landings) and are the joints
+  # where regen events trigger hardware overcurrent/power protection.
+  cfg.rewards["neg_power_knee"] = RewardTermCfg(
+    func=mdp.negative_knee_power_l2,
+    weight=-10.0,
+    params={
+      "asset_cfg": SceneEntityCfg("robot", joint_names=r".*_knee_joint"),
+      "power_deadband": 150.0,
+      "penalty_scale": 500.0,
+    },
+  )
 
   cfg.terminations["ee_body_pos"].params["body_names"] = (
     "left_ankle_roll_link",

@@ -87,6 +87,10 @@ def unitree_go2_flat_tracking_env_cfg(
   # Go2 has no joint torque support — remove tau reward term.
   cfg.rewards.pop("motion_joint_torque", None)
 
+  # Negative knee power penalty is G1-only (added in g1 env_cfgs; Go2 has no
+  # *_knee_joint naming and different actuator groups).
+  cfg.rewards.pop("neg_power_knee", None)
+
   # Go2 has no head — remove head contact penalty term.
   cfg.rewards.pop("head_contact", None)
 

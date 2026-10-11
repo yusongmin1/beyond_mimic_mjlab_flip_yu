@@ -146,6 +146,87 @@ class electrical_power_cost:
     return torch.sum(mech_pos, dim=1)
 
 
+def negative_joint_power_l2(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  power_deadband: float = 0.0,
+  penalty_scale: float = 1.0,
+) -> torch.Tensor:
+  """Penalize excessive regenerative braking (negative mechanical power).
+
+  OmniXtreme power-safety term (arXiv:2602.23843, eq. 3 / appendix V-K):
+  for each selected joint, compute the instantaneous mechanical power
+  P = tau * qd from the applied actuator force and joint velocity, and
+  penalize the negative power beyond a deadband with an L2-squared kernel:
+
+      sum_j (max(-P_j - power_deadband, 0) / penalty_scale)^2
+
+  Braking within the deadband is free; large regenerative braking spikes
+  (which can trigger motor overcurrent / power protection on hardware) are
+  strongly discouraged. Use with a negative weight. Expects one actuator per
+  selected joint (asset_cfg should resolve matching joint/actuator ids).
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  tau = asset.data.actuator_force[:, asset_cfg.actuator_ids]
+  qd = asset.data.joint_vel[:, asset_cfg.joint_ids]
+  power = tau * qd
+  excess = torch.clamp(-power - power_deadband, min=0.0) / max(penalty_scale, 1.0e-6)
+  return torch.sum(torch.square(excess), dim=1)
+
+
+class negative_knee_power_l2:
+  """OmniXtreme negative-power penalty aligned joint<->actuator by name.
+
+  Same math as :func:`negative_joint_power_l2`, but resolves the actuator
+  controlling each selected joint by name at init time. This guarantees
+  tau/qd column alignment even when the entity's actuator insertion order
+  differs from its joint tree order (e.g. G1 motor-group ordering).
+  Params: asset_cfg (joint_names selects the joints), power_deadband [W],
+  penalty_scale [W] (normalizer K in the paper). Use with a negative weight.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+    asset: Entity = env.scene[asset_cfg.name]
+
+    joint_ids, joint_names = asset.find_joints(
+      asset_cfg.joint_names, preserve_order=True
+    )
+    if not joint_ids:
+      raise ValueError(
+        "negative_knee_power_l2: no joints matched "
+        f"'{asset_cfg.joint_names}' on entity '{asset_cfg.name}'."
+      )
+
+    actuator_index = {name: i for i, name in enumerate(asset.actuator_names)}
+    missing = [n for n in joint_names if n not in actuator_index]
+    if missing:
+      raise ValueError(
+        f"negative_knee_power_l2: joints without a matching actuator: {missing}. "
+        "This term expects one actuator per selected joint."
+      )
+
+    self._asset_name = asset_cfg.name
+    self._joint_ids = torch.tensor(joint_ids, dtype=torch.long, device=env.device)
+    self._actuator_ids = torch.tensor(
+      [actuator_index[n] for n in joint_names], dtype=torch.long, device=env.device
+    )
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+    power_deadband: float = 0.0,
+    penalty_scale: float = 1.0,
+  ) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    tau = asset.data.actuator_force[:, self._actuator_ids]
+    qd = asset.data.joint_vel[:, self._joint_ids]
+    power = tau * qd
+    excess = torch.clamp(-power - power_deadband, min=0.0) / max(penalty_scale, 1.0e-6)
+    return torch.sum(torch.square(excess), dim=1)
+
+
 def flat_orientation_l2(
   env: ManagerBasedRlEnv,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
