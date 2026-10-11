@@ -173,21 +173,21 @@ Specify a checkpoint explicitly:
   --keep-randomization True
 ```
 
-### G1 tracking:
+## G1 tracking:
+**Train** (4096 envs, 10000 iterations; loop over any motions): 环境变量必须修改
 
 ```bash
 conda activate env_isaaclab
 cd /home/zju/Downloads/mjlab-dev-go2-mimic
 export PYTHONPATH=src
 ```
-
-**Train** (4096 envs, 10000 iterations; loop over any motions):
-
 ```bash
 for motion in \
-  chunwan/88_05_stageii_unitree_g1 \
   omnixtreme/g1_motion_long_01\
-  omnixtreme/g1_motion_long_02
+  omnixtreme/g1_motion_long_06 \
+  omnixtreme/g1_motion_long_08 \
+  omnixtreme/g1_motion_long_10 \
+  omnixtreme/g1_motion_long_13
 do
   echo "========== Training $motion =========="
   python -m mjlab.scripts.train \
@@ -199,58 +199,66 @@ do
 done
 ```
 
-With state estimation in the actor obs, use task id
-`Mjlab-Tracking-Flat-Unitree-G1` instead.
-
-**Play** (auto-picks name-sorted latest ``model_*.pt``).
-``--keep-randomization True`` keeps training-time DR:
-
 ```bash
 python -m mjlab.scripts.play \
   Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
   --motion-file $PWD/motions/chunwan/90_15_stageii_unitree_g1.npz  \
-  --keep-randomization True \
-  --export-torchscript True
 ```
 
-Specify a checkpoint explicitly:
+Specify a checkpoint explicitly: 50个机器人   --keep-randomization True
 
 ```bash
 python -m mjlab.scripts.play \
   Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
   --motion-file $PWD/motions/chunwan/90_15_stageii_unitree_g1.npz \
-  --checkpoint-file logs/rsl_rl/g1_tracking/<run>/model_10000.pt \
   --keep-randomization True
 ```
 
-TensorBoard:
-
+### 后端可视化，服务器中也可以使用
 ```bash
-tensorboard --logdir logs/rsl_rl/g1_tracking
+python -m mjlab.scripts.play \
+  Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
+  --motion-file $PWD/motions/omnixtreme/g1_motion_long_01.npz \
+  --viewer viser
 ```
 
-**Export TorchScript `policy.pt`** (for C++ deploy; training also writes
-`policy.pt` next to each checkpoint on save):
+### G1 Dance 任务（倒地恢复实验入口）
+
+**该任务用于后续倒地恢复（fall-and-get-up）实验**：基于
+`tracking_env_cfg_dance.py` 的宽松锚点奖励配置（root_pos 1.0 / root_ori 0.5），
+后续将在此任务上叠加放松终止条件、躺倒惩罚等倒地恢复训练改动。
+执行器已启用梯形力矩-速度包络（见下节）。当前动作数据仅一个：
+`motions/dance1_subject2.npz`。
 
 ```bash
-# While playing:
-uv run python -m mjlab.scripts.play \
-  Mjlab-Tracking-Flat-Unitree-Go2-No-State-Estimation \
-  --motion-file $PWD/motions/go2_longjump_m0p5.npz \
-  --checkpoint-file logs/rsl_rl/go2_tracking/<run>/model_10000.pt \
-  --export-torchscript True
-
-# Or convert only:
-uv run export-tracking-pt \
-  --checkpoint-file logs/rsl_rl/go2_tracking/<run>/model_10000.pt \
-  --motion-file $PWD/motions/go2_longjump_m0p5.npz
+conda activate env_isaaclab
+cd /home/zju/Downloads/mjlab-dev-go2-mimic
+export PYTHONPATH=src
 ```
 
-TensorBoard:
+**Train**:
 
 ```bash
-tensorboard --logdir logs/rsl_rl/go2_tracking
+python -m mjlab.scripts.train \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation \
+  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
+  --env.scene.num-envs 4096 \
+  --agent.max-iterations 10000 \
+  --agent.run-name "dance1_subject2"
 ```
+
+带状态估计版本用任务 ID `Mjlab-Tracking-Flat-Unitree-G1-Dance`。
+日志位于 `logs/rsl_rl/g1_tracking/dance1_subject2/`。
+
+**Play**:
+
+```bash
+python -m mjlab.scripts.play \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation \
+  --motion-file $PWD/motions/dance1_subject2.npz \
+  --keep-randomization True
+```
+
 
 #### Domain Randomization (Go2 vs G1)
 
@@ -316,6 +324,99 @@ uv run play Mjlab-Your-Task-Id --agent random  # Sends uniform random actions
 
 When running motion-tracking tasks, add `--registry-name your-org/motions/motion-name` to the command.
 
+## Development
+
+```bash
+make test          # Run all tests
+make test-fast     # Skip slow tests
+make format        # Format and lint
+make docs          # Build docs locally
+```
+```bash
+conda activate env_isaaclab
+cd /home/zju/Downloads/mjlab-dev-go2-mimic
+export PYTHONPATH=src MUJOCO_GL=egl
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH:-}"
+for motion in \
+    88_06_stageii_unitree_g1 \
+    90_08_stageii_unitree_g1 \
+    90_15_stageii_unitree_g1
+do
+  echo "========== Training $motion =========="
+  python -m mjlab.scripts.train \
+    Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
+    --env.commands.motion.motion-file "$PWD/motions/chunwan/${motion}.npz" \
+    --env.scene.num-envs 4096 \
+    --agent.max-iterations 10000 \
+    --agent.run-name "chunwan_${motion}" \
+    --gpu-ids '[0]'
+done
+```
+<!-- For development setup: `uvx pre-commit install` -->
+## TODO
+- [] 手部接触的力进行限制
+- [] 塑料手的碰撞体去掉
+- [x] 手部接触的动作学不好
+- [] 逐渐收紧的终止条件
+- [x] 电机力矩转速曲线的梯形包络
+- [] 负功率限制(omnixtreme)
+- [x] 添加后空翻等极限动作
+- [] 查尔斯顿舞的长序列动作(3min) 倒地恢复的力课程
+- [] 统一的奖励系数
+
+## G1 执行器建模：梯形力矩-速度包络与非线性摩擦
+
+所有注册的 G1 任务（`Mjlab-Tracking-Flat-Unitree-G1*`、`Mjlab-Tracking-Flat-Unitree-G1-Dance*`）
+使用 `UnitreeActuator`（`src/mjlab/actuator/unitree_actuator.py`），
+建模来自 [unitree_rl_lab](https://github.com/unitreerobotics/unitree_rl_lab) 的
+`unitree_actuators.py`，并见 [OmniXtreme](https://arxiv.org/abs/2602.23843) 论文
+III-B 节 "Actuation-Aware Torque–Speed Constraints" 与 Table IX。
+
+### 梯形力矩-速度包络（论文式 4–5）
+
+$$
+\tau_{\max}(v)=\begin{cases}\tau_{y1}, & |v|\le v_{x1},\ v\cdot\tau>0 \\[2pt]
+\tau_{y2}, & |v|\le v_{x1},\ v\cdot\tau\le 0 \\[2pt]
+\tau_{\text{peak}}\!\left(1-\dfrac{|v|-v_{x1}}{v_{x2}-v_{x1}}\right), & v_{x1}<|v|\le v_{x2} \\[2pt]
+0, & |v|>v_{x2}\end{cases}
+$$
+
+其中 $\tau_{\text{peak}}$ 按力矩与速度方向选取：同向（驱动）取 $\tau_{y1}$，
+反向（制动）取 $\tau_{y2}$（反电动势使制动峰值更高）。超出 $v_{x1}$（T-N 曲线
+拐点）后峰值力矩线性锥削，至空载转速 $v_{x2}$ 降为零；指令力矩最终被裁剪到
+$[-\tau_{\max},\ \tau_{\max}]$ 内。
+
+### 非线性摩擦项（论文式 6）
+
+力矩削波之后，再扣除执行器内部摩擦损耗：
+
+$$
+\tau_{\text{applied}}=\tau_{\text{clipped}}-\underbrace{\mu_{s}\tanh\!\left(\frac{v}{v_{\text{act}}}\right)}_{\text{平滑库仑摩擦}}-\underbrace{\mu_{d}\,v}_{\text{粘性摩擦}}
+$$
+
+- **平滑库仑摩擦项** $\mu_s\tanh(v/v_{\text{act}})$：`tanh` 是符号函数
+  $\operatorname{sign}(v)$ 的光滑近似，在 $|v|\lesssim v_{\text{act}}$ 内
+  从 0 平滑爬升并很快饱和到 $\pm\mu_s$，捕捉静摩擦→动摩擦的过渡；
+- **粘性摩擦项** $\mu_d v$：与速度成正比的耗散，提供附加阻尼。
+
+摩擦始终与速度同号、从指令力矩中扣除，因此总是阻碍运动。实现见
+`UnitreeActuator.compute()`（削波后的减摩擦）与 `_clip_effort()`
+（包络锥削削波）。
+
+### 电机参数（unitree_rl_lab / OmniXtreme Table IX）
+
+| 电机 | 关节 | $\tau_{y1}$ (N·m) | $\tau_{y2}$ (N·m) | $v_{x1}$ (rad/s) | $v_{x2}$ (rad/s) | $\mu_s$ | $\mu_d$ | $I$ (kg·m²) |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5020-16 | 肩/肘/wrist_roll | 24.8 | 31.9 | 30.86 | 40.13 | 0.6 | 0.06 | 3.610e-3 |
+| 2×5020-16（并联） | waist_pitch/roll、双踝 | 49.6 | 63.8 | 30.86 | 40.13 | 1.2 | 0.12 | 7.219e-3 |
+| 7520-14.3 | hip_pitch / hip_yaw / waist_yaw | 71.0 | 83.3 | 22.63 | 35.52 | 1.6 | 0.16 | 1.018e-2 |
+| 7520-22.5 | hip_roll / knee | 111.0 | 131.0 | 14.5 | 22.7 | 2.4 | 0.24 | 2.510e-2 |
+| 4010-25 | wrist_pitch / wrist_yaw | 4.8 | 8.6 | 15.3 | 24.76 | 0.6 | 0.06 | 4.250e-3 |
+
+摩擦激活速度 $v_{\text{act}}=0.01$ rad/s。腰部俯仰/侧倾与双踝为两台 5020
+电机经四连杆并联驱动（名义 1:1 传动比）：力矩类参数（$\tau_{y1}$、$\tau_{y2}$、
+$\mu_s$、$\mu_d$）与折算惯量 $I$、PD 增益均 ×2，速度角点 $v_{x1}$、$v_{x2}$
+不缩放（并联电机转速相同）。
 
 ## Community Projects
 
@@ -404,45 +505,6 @@ Want to share your project? Post in [Show and Tell](https://github.com/mujocolab
 
 Full documentation is available at **[mujocolab.github.io/mjlab](https://mujocolab.github.io/mjlab/)**.
 
-## Development
-
-```bash
-make test          # Run all tests
-make test-fast     # Skip slow tests
-make format        # Format and lint
-make docs          # Build docs locally
-```
-```bash
-conda activate env_isaaclab
-cd /home/zju/Downloads/mjlab-dev-go2-mimic
-export PYTHONPATH=src MUJOCO_GL=egl
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH:-}"
-for motion in \
-    88_06_stageii_unitree_g1 \
-    90_08_stageii_unitree_g1 \
-    90_15_stageii_unitree_g1
-do
-  echo "========== Training $motion =========="
-  python -m mjlab.scripts.train \
-    Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
-    --env.commands.motion.motion-file "$PWD/motions/chunwan/${motion}.npz" \
-    --env.scene.num-envs 4096 \
-    --agent.max-iterations 10000 \
-    --agent.run-name "chunwan_${motion}" \
-    --gpu-ids '[0]'
-done
-```
-<!-- For development setup: `uvx pre-commit install` -->
-## TODO
-- [] 手部接触的力进行限制
-- [] 塑料手的碰撞体去掉
-- [x] 手部接触的动作学不好
-- [] 逐渐收紧的终止条件
-- [x] 电机力矩转速曲线的梯形包络
-- [] 负功率限制(omnixtreme)
-- [x] 添加后空翻等极限动作
-- [] 查尔斯顿舞的长序列动作(3min) 倒地恢复的力课程
-- [] 统一的奖励系数
 ## Citation
 
 If you use mjlab in your research, please cite:
