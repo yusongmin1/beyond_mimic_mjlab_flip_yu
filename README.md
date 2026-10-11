@@ -219,6 +219,20 @@ python -m mjlab.scripts.play \
   --viewer viser
 ```
 
+### Play 时打印手部触地接触
+
+加 `--print-hand-contact True`（tyro 的 `FlagConversionOff` 要求布尔参数
+显式给值）：自动注入手部（腕部三连杆，塑料手碰撞体已删除）
+vs 地面的接触传感器，play 中实时打印接触 link 与法向力大小（默认阈值 1 N，
+0.5 s 节流，仅看 env 0）：
+
+```bash
+ python -m mjlab.scripts.play   Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation   --motion-file $PWD/motions/omnixtreme/g1_motion_long_01.npz --print-hand-contact True
+```
+
+可选参数：`--hand-contact-bodies <regex>`（默认
+`(left|right)_wrist_(pitch|roll|yaw)_link`）、`--hand-contact-min-force <N>`。
+
 ### G1 Dance 任务（倒地恢复实验入口）
 
 **该任务用于后续倒地恢复（fall-and-get-up）实验**：基于
@@ -348,15 +362,17 @@ done
 ```
 <!-- For development setup: `uvx pre-commit install` -->
 ## TODO
-- [] 手部接触的力进行限制
 - [x] 塑料手的碰撞体去掉
 - [x] 手部接触的动作学不好
-- [] 逐渐收紧的终止条件
 - [x] 电机力矩转速曲线的梯形包络
 - [x] 负功率限制(omnixtreme)
 - [x] 添加后空翻等极限动作
+- [] 手部接触的力进行限制
+- [] 逐渐收紧的终止条件
 - [] 查尔斯顿舞的长序列动作(3min) 倒地恢复的力课程
 - [] 统一的奖励系数
+- [] 更高的抗扰性，地形，
+- [] 更强的跟踪能力(适应模块)
 
 ## G1 执行器建模：梯形力矩-速度包络与非线性摩擦
 

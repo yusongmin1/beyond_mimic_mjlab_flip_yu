@@ -2,6 +2,7 @@
 
 import os
 import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
@@ -11,12 +12,17 @@ import tyro
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
+from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.utils.os import get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
+
+# Hand-region bodies for contact printing (G1 wrist links; the rubber hand
+# collision geoms were removed, wrist capsules are the remaining colliders).
+HAND_BODY_PATTERN = r"(left|right)_wrist_(pitch|roll|yaw)_link"
 
 
 @dataclass(frozen=True)
@@ -38,6 +44,12 @@ class PlayConfig:
   """Disable all termination conditions (useful for viewing motions with dummy agents)."""
   keep_randomization: bool = False
   """If True, use training env cfg (domain randomization on) and default to 50 envs."""
+  print_hand_contact: bool = False
+  """Print hand/wrist-ground contact links and force magnitudes during play."""
+  hand_contact_bodies: str = HAND_BODY_PATTERN
+  """Regex of body names counted as 'hand region' for contact printing."""
+  hand_contact_min_force: float = 1.0
+  """Minimum contact force magnitude (N) to report."""
   export_torchscript: bool = False
   """If True, export TorchScript ``policy.pt`` after loading the checkpoint."""
   export_torchscript_path: str | None = None
@@ -45,6 +57,82 @@ class PlayConfig:
 
   # Internal flag used by demo script.
   _demo_mode: tyro.conf.Suppress[bool] = False
+
+
+class HandContactPrinter:
+  """Wraps an env-like object; after each step prints hand-region ground contacts.
+
+  Reads the 'hand_ground_contact' ContactSensor (body-mode primaries, one
+  MuJoCo sensor per body) and prints per-body force magnitudes above the
+  threshold. Passthrough for get_observations/step/reset/close; all other
+  attribute access delegates to the wrapped env.
+  """
+
+  def __init__(
+    self,
+    env,
+    body_names: list[str],
+    min_force: float,
+    print_interval_s: float = 0.5,
+  ):
+    self._env = env
+    self._body_names = body_names
+    self._min_force = min_force
+    self._print_interval_s = print_interval_s
+    self._last_print_time = 0.0
+
+  def __getattr__(self, name):
+    return getattr(self._env, name)
+
+  @property
+  def num_envs(self) -> int:
+    return self._env.num_envs
+
+  def get_observations(self):
+    return self._env.get_observations()
+
+  def reset(self):
+    return self._env.reset()
+
+  def close(self) -> None:
+    self._env.close()
+
+  def step(self, actions):
+    ret = self._env.step(actions)
+    try:
+      self._print_hand_contacts()
+    except Exception as e:  # noqa: BLE001 — printing must never kill play.
+      print(f"[hand-contact] WARN: contact read failed: {e}")
+    return ret
+
+  def _print_hand_contacts(self) -> None:
+    scene = self._env.unwrapped.scene
+    sensor = scene["hand_ground_contact"]
+    data = sensor.data
+    if data.found is None or data.force is None:
+      return
+
+    found = data.found  # [B, N]
+    force = data.force  # [B, N, 3]
+    force_mag = torch.linalg.vector_norm(force, dim=-1)  # [B, N]
+
+    # Only inspect env 0 (play focuses on the tracked env; printing all envs
+    # would spam at 50 envs).
+    hits = (found[0] > 0) & (force_mag[0] > self._min_force)
+    if not bool(hits.any()):
+      return
+
+    now = time.time()
+    if now - self._last_print_time < self._print_interval_s:
+      return
+    self._last_print_time = now
+
+    parts = []
+    for idx in torch.nonzero(hits, as_tuple=False).flatten().tolist():
+      parts.append(
+        f"{self._body_names[idx]}: {force_mag[0, idx].item():.1f} N"
+      )
+    print(f"[hand-contact] {'; '.join(parts)}")
 
 
 def run_play(task_id: str, cfg: PlayConfig):
@@ -185,6 +273,43 @@ def run_play(task_id: str, cfg: PlayConfig):
     print(
       "[WARN] Video recording with dummy agents is disabled (no checkpoint/log_dir)."
     )
+
+  if cfg.print_hand_contact:
+    # Resolve hand-region bodies against the robot entity and add a
+    # body-vs-terrain ContactSensor (one primary per body → per-link force).
+    entities = env_cfg.scene.entities or {}
+    robot_names = [n for n, e in entities.items() if "robot" in n.lower()] or list(
+      entities.keys()
+    )
+    if not robot_names:
+      raise ValueError("--print-hand-contact requires a robot entity in the scene.")
+    robot_name = "robot" if "robot" in entities else robot_names[0]
+    robot_spec = entities[robot_name].spec_fn()
+    all_bodies = [b.name.split("/")[-1] for b in robot_spec.bodies[1:]]
+    import re as _re  # noqa: PLC0415
+
+    hand_bodies = [b for b in all_bodies if _re.fullmatch(cfg.hand_contact_bodies, b)]
+    if not hand_bodies:
+      raise ValueError(
+        f"--print-hand-contact: no bodies match '{cfg.hand_contact_bodies}'. "
+        f"Available: {all_bodies}"
+      )
+    hand_sensor = ContactSensorCfg(
+      name="hand_ground_contact",
+      primary=ContactMatch(
+        mode="body", pattern=tuple(hand_bodies), entity=robot_name
+      ),
+      secondary=ContactMatch(mode="body", pattern="terrain"),
+      fields=("found", "force"),
+      reduce="maxforce",
+      num_slots=1,
+    )
+    env_cfg.scene.sensors = tuple(env_cfg.scene.sensors or ()) + (hand_sensor,)
+    print(
+      f"[INFO]: Hand contact printing on: {hand_bodies} "
+      f"(threshold {cfg.hand_contact_min_force} N)"
+    )
+
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
   print(
     f"[INFO]: Playing with {env.num_envs} env(s); "
@@ -203,6 +328,14 @@ def run_play(task_id: str, cfg: PlayConfig):
     )
 
   env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+
+  if cfg.print_hand_contact:
+    env = HandContactPrinter(
+      env,
+      body_names=hand_bodies,
+      min_force=cfg.hand_contact_min_force,
+    )
+
   if DUMMY_MODE:
     action_shape: tuple[int, ...] = env.unwrapped.action_space.shape
     if cfg.agent == "zero":
