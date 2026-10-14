@@ -55,7 +55,7 @@ class DelayBuffer:
       Even when an update would occur, keep previous lag with 20% chance.
       Creates temporal correlation in delay patterns.
 
-  Per-Environment vs Shared Lags
+    Per-Environment vs Shared Lags
   ==============================
 
     **per_env=True** (default)
@@ -67,6 +67,16 @@ class DelayBuffer:
     **per_env=False**
       All environments share one sampled lag:
         All batches: lag=2 → all return obs from t-2
+
+  Per-Feature Lags
+  ================
+
+    **per_feature=False** (default)
+      One lag per environment applies to the entire feature vector.
+
+    **per_feature=True**
+      Each feature (e.g. each joint) samples its own lag. Requires
+      ``feature_shape`` matching the trailing dims of appended tensors.
 
   Reset Behavior
   ==============
@@ -85,6 +95,10 @@ class DelayBuffer:
     device (str, optional): Torch device for storage and RNG.
     per_env (bool, optional): If True, sample a separate lag per environment;
       otherwise sample one lag and share it across environments.
+    per_feature (bool, optional): If True, sample an independent lag for each
+      feature (requires ``feature_shape``). Default False.
+    feature_shape (tuple[int, ...] | None, optional): Trailing feature dims of
+      appended tensors when ``per_feature=True`` (e.g. ``(num_joints,)``).
     hold_prob (float, optional): Probability in `[0.0, 1.0]` to keep the previous
       lag when an update would occur. Creates temporal correlation in delays.
     update_period (int, optional): If > 0, refresh lags every N steps per
@@ -124,6 +138,8 @@ class DelayBuffer:
     batch_size: int = 1,
     device: str = "cpu",
     per_env: bool = True,
+    per_feature: bool = False,
+    feature_shape: tuple[int, ...] | None = None,
     hold_prob: float = 0.0,
     update_period: int = 0,
     per_env_phase: bool = True,
@@ -137,22 +153,33 @@ class DelayBuffer:
       raise ValueError(f"hold_prob must be in [0, 1], got {hold_prob}")
     if update_period < 0:
       raise ValueError(f"update_period must be >= 0, got {update_period}")
+    if per_feature and not feature_shape:
+      raise ValueError("feature_shape is required when per_feature=True")
+    if not per_feature and feature_shape is not None:
+      raise ValueError("feature_shape is only valid when per_feature=True")
 
     self.min_lag = min_lag
     self.max_lag = max_lag
     self.batch_size = batch_size
     self.device = device
     self.per_env = per_env
+    self.per_feature = per_feature
+    self.feature_shape = feature_shape if per_feature else ()
     self.hold_prob = hold_prob
     self.update_period = update_period
     self.per_env_phase = per_env_phase
     self.generator = generator
+    self._lag_shape = (
+      (batch_size, *self.feature_shape) if per_feature else (batch_size,)
+    )
 
     buffer_size = max_lag + 1 if max_lag > 0 else 1
     self._buffer = CircularBuffer(
       max_len=buffer_size, batch_size=batch_size, device=device
     )
-    self._current_lags = torch.zeros(batch_size, dtype=torch.long, device=device)
+    self._current_lags = torch.zeros(
+      self._lag_shape, dtype=torch.long, device=device
+    )
     self._step_count = torch.zeros(batch_size, dtype=torch.long, device=device)
 
     if update_period > 0 and per_env_phase:
@@ -174,7 +201,7 @@ class DelayBuffer:
 
   @property
   def current_lags(self) -> torch.Tensor:
-    """Current lag per environment. Shape: (batch_size,)."""
+    """Current lags. Shape: (batch_size,) or (batch_size, *feature_shape)."""
     return self._current_lags
 
   def set_lags(
@@ -185,11 +212,21 @@ class DelayBuffer:
     """Set lag values for specified environments.
 
     Args:
-      lags: Lag values to set. Shape: (num_batch_ids,) or scalar.
+      lags: Lag values to set. Accepted shapes:
+        - scalar
+        - ``(num_batch_ids,)`` — broadcast across features when ``per_feature``
+        - ``(num_batch_ids, *feature_shape)`` when ``per_feature``
       batch_ids: Batch indices to set, or None to set all.
     """
     idx = slice(None) if batch_ids is None else batch_ids
-    self._current_lags[idx] = lags.clamp(self.min_lag, self.max_lag)
+    lags = lags.to(device=self.device, dtype=torch.long).clamp(
+      self.min_lag, self.max_lag
+    )
+    if self.per_feature and lags.ndim == 1:
+      # Broadcast one lag per env onto every feature.
+      view_shape = (-1, *([1] * len(self.feature_shape)))
+      lags = lags.view(view_shape)
+    self._current_lags[idx] = lags
 
   def reset(
     self, batch_ids: Sequence[int] | torch.Tensor | slice | None = None
@@ -239,10 +276,20 @@ class DelayBuffer:
 
     # Clamp lags to valid range [0, buffer_length - 1].
     # Buffer may not be full yet (e.g., only 2 frames but sampled lag=3).
-    valid_lags = torch.minimum(self._current_lags, self._buffer.current_length - 1)
-    valid_lags = valid_lags.clamp_min(0)
+    avail = self._buffer.current_length - 1
+    if self.per_feature:
+      avail = avail.view(self.batch_size, *([1] * len(self.feature_shape)))
+    valid_lags = torch.minimum(self._current_lags, avail).clamp_min(0)
 
     return self._buffer[valid_lags]
+
+  def _broadcast_env_mask(self, mask: torch.Tensor) -> torch.Tensor:
+    """Broadcast a (batch_size,) mask onto the lag tensor shape."""
+    if not self.per_feature:
+      return mask
+    return mask.view(self.batch_size, *([1] * len(self.feature_shape))).expand(
+      self._lag_shape
+    )
 
   def _update_lags(self) -> None:
     """Update current lags according to configured policy."""
@@ -254,7 +301,8 @@ class DelayBuffer:
     else:
       should_update = torch.ones(self.batch_size, dtype=torch.bool, device=self.device)
     new_lags = self._sample_lags(should_update)
-    self._current_lags = torch.where(should_update, new_lags, self._current_lags)
+    update_mask = self._broadcast_env_mask(should_update)
+    self._current_lags = torch.where(update_mask, new_lags, self._current_lags)
     self._step_count += 1
 
   def _sample_lags(self, mask: torch.Tensor) -> torch.Tensor:
@@ -264,9 +312,29 @@ class DelayBuffer:
       mask: Boolean mask of shape (batch_size,) indicating which envs to sample.
 
     Returns:
-      New lags with shape (batch_size,).
+      New lags with shape (batch_size,) or (batch_size, *feature_shape).
     """
-    if self.per_env:
+    if self.per_feature:
+      if self.per_env:
+        candidate_lags = torch.randint(
+          self.min_lag,
+          self.max_lag + 1,
+          self._lag_shape,
+          dtype=torch.long,
+          device=self.device,
+          generator=self.generator,
+        )
+      else:
+        shared = torch.randint(
+          self.min_lag,
+          self.max_lag + 1,
+          self.feature_shape,
+          dtype=torch.long,
+          device=self.device,
+          generator=self.generator,
+        )
+        candidate_lags = shared.unsqueeze(0).expand(self._lag_shape)
+    elif self.per_env:
       candidate_lags = torch.randint(
         self.min_lag,
         self.max_lag + 1,
@@ -289,15 +357,15 @@ class DelayBuffer:
     if self.hold_prob > 0.0:
       should_sample = (
         torch.rand(
-          self.batch_size,
+          self._lag_shape,
           dtype=torch.float32,
           device=self.device,
           generator=self.generator,
         )
         >= self.hold_prob
       )
-      update_mask = mask & should_sample
+      update_mask = self._broadcast_env_mask(mask) & should_sample
     else:
-      update_mask = mask
+      update_mask = self._broadcast_env_mask(mask)
 
     return torch.where(update_mask, candidate_lags, self._current_lags)

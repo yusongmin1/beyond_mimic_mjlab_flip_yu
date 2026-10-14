@@ -189,8 +189,8 @@ def make_dance_env_cfg() -> ManagerBasedRlEnvCfg:
         "field": "body_ipos",
         "ranges": {
           0: (-0.025, 0.025),
-          1: (-0.03, 0.03),
-          2: (-0.03, 0.03),
+          1: (-0.05, 0.05),
+          2: (-0.05, 0.05),
         },
       },
     ),
@@ -263,7 +263,7 @@ def make_dance_env_cfg() -> ManagerBasedRlEnvCfg:
     "motion_body_lin_vel": RewardTermCfg(
       func=mdp.motion_global_body_linear_velocity_error_exp,
       weight=1.0,
-      params={"command_name": "motion", "std": 2.0},
+      params={"command_name": "motion", "std": 1.0},
     ),
     "motion_body_ang_vel": RewardTermCfg(
       func=mdp.motion_global_body_angular_velocity_error_exp,
@@ -302,7 +302,7 @@ def make_dance_env_cfg() -> ManagerBasedRlEnvCfg:
     "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
     "anchor_pos": TerminationTermCfg(
       func=mdp.bad_anchor_pos_z_only,
-      params={"command_name": "motion", "threshold": 0.5},
+      params={"command_name": "motion", "threshold": 0.25},
     ),
     "anchor_ori": TerminationTermCfg(
       func=mdp.bad_anchor_ori,
@@ -316,7 +316,7 @@ def make_dance_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.bad_motion_body_pos_z_only,
       params={
         "command_name": "motion",
-        "threshold": 0.5,
+        "threshold": 0.25,
         "body_names": (),  # Set per-robot.
       },
     ),

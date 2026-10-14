@@ -136,6 +136,17 @@ def test_getitem_lifo_and_clamp(device):
   assert torch.allclose(out, torch.tensor([[1.0], [20.0]], device=device))
 
 
+def test_getitem_per_feature_lags(device):
+  """__getitem__ supports independent lags per feature."""
+  buffer = CircularBuffer(max_len=3, batch_size=1, device=device)
+  buffer.append(torch.tensor([[1.0, 10.0]], device=device))
+  buffer.append(torch.tensor([[2.0, 20.0]], device=device))
+  buffer.append(torch.tensor([[3.0, 30.0]], device=device))
+
+  out = buffer[torch.tensor([[0, 2]], device=device)]
+  assert torch.allclose(out, torch.tensor([[3.0, 10.0]], device=device))
+
+
 def test_backfill_after_per_batch_reset(device):
   """After resetting a row, the next append back-fills its entire history for that row."""
   buffer = CircularBuffer(max_len=3, batch_size=2, device=device)

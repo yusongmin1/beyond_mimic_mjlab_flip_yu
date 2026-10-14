@@ -29,6 +29,19 @@ if TYPE_CHECKING:
 _DESIRED_FRAME_COLORS = ((1.0, 0.5, 0.5), (0.5, 1.0, 0.5), (0.5, 0.5, 1.0))
 
 
+def _quat_xyzw_to_wxyz(root_xyzw: torch.Tensor) -> torch.Tensor:
+  """Convert root quat (x,y,z,w at indices 3:7) to mjlab w,x,y,z ordering."""
+  return torch.stack(
+    [
+      root_xyzw[..., 6],
+      root_xyzw[..., 3],
+      root_xyzw[..., 4],
+      root_xyzw[..., 5],
+    ],
+    dim=-1,
+  )
+
+
 class MotionLoader:
   def __init__(
     self,
@@ -121,6 +134,37 @@ class MotionCommand(CommandTerm):
       self.num_envs, len(cfg.body_names), 4, device=self.device
     )
     self.body_quat_relative_w[:, :, 0] = 1.0
+
+    # Body-name indexes used by stand-up reward shaping (KungFuAthleteBot).
+    # Root = first body in body_names (pelvis); shoulders = shoulder_roll links.
+    self.root_index: list[int] = [0]
+    self.shoulders_indexes: list[int] = [
+      i for i, name in enumerate(cfg.body_names) if name.endswith("shoulder_roll_link")
+    ]
+    # Rolling anchor history for xy-drift penalty (updated in _update_command).
+    self.prev_anchor_pos = torch.zeros(
+      self.num_envs, 3, dtype=torch.float32, device=self.device
+    )
+    self.current_anchor_pos = torch.zeros_like(self.prev_anchor_pos)
+
+    # Fall-recovery grouping (KungFuAthleteBot-style), enabled when
+    # recovery ratios are configured.
+    self.is_recovery_env = torch.zeros(
+      self.num_envs, dtype=torch.bool, device=self.device
+    )
+    self.is_fallen_init_env = torch.zeros(
+      self.num_envs, dtype=torch.bool, device=self.device
+    )
+    self._fallen_pool = None
+    self._motion_env_origins = None
+    if cfg.fallen_init_ratio > 0.0 or cfg.recovery_env_ratio > 0.0:
+      if cfg.fallen_init_ratio > 0.0:
+        from .recovery import RecoveryFallenPool
+
+        self._fallen_pool = RecoveryFallenPool.get()
+        self._fallen_pool.init(cfg.init_pos_file, cfg.init_num_diverse)
+      # Initial group assignment (re-rolled per reset in _resample_command).
+      self._roll_recovery_groups(torch.arange(self.num_envs, device=self.device))
 
     self.bin_count = int(self.motion.time_step_total // (1 / env.step_dt)) + 1
     self.bin_failed_count = torch.zeros(
@@ -387,6 +431,69 @@ class MotionCommand(CommandTerm):
     self.metrics["sampling_top1_prob"][:] = 1.0 / self.bin_count
     self.metrics["sampling_top1_bin"][:] = 0.5  # No specific bin preference.
 
+  def _roll_recovery_groups(self, env_ids: torch.Tensor) -> None:
+    """Split envs into normal / fall-window-recovery / fallen-init groups.
+
+    Per user spec: 50% of envs are normal; of the remaining 50% recovery
+    envs, half fall during the episode and get a get-up window (fall-window),
+    half start lying on the ground (fallen-init). Recovery envs are the
+    union of fall-window + fallen-init (this mask must match the
+    RecoveryTerminationManager static mask; we keep the union fixed and only
+    re-roll which recovery envs are fallen-init on each reset).
+    """
+    if self.cfg.recovery_env_ratio <= 0.0:
+      self.is_recovery_env[env_ids] = False
+      self.is_fallen_init_env[env_ids] = False
+      return
+
+    n = env_ids.numel()
+    rec = torch.rand(n, device=self.device) < self.cfg.recovery_env_ratio
+    # Among recovery envs, fallen-init share (default: 50% of recovery).
+    fallen = rec & (
+      torch.rand(n, device=self.device) < self.cfg.fallen_init_ratio
+    )
+    self.is_recovery_env[env_ids] = rec
+    self.is_fallen_init_env[env_ids] = fallen
+
+  def _apply_fallen_init(self, env_ids: torch.Tensor) -> None:
+    """Write a fallen state from the .pth pool into sim for ``env_ids``.
+
+    Uses motion-reference x,y (with pose_range RSI) so the robot starts on
+    the ground at the reference's planar location; z / orientation / joint
+    positions come from the fallen pool sample. Velocities are zeroed.
+    Reference time_steps are rewound to 0 so the policy is graded on getting
+    up and re-tracking from the start of the motion.
+    """
+    sample = self._fallen_pool.sample(
+      len(env_ids), device=self.device, zero_velocity=True
+    )
+    root_xyzw = sample["root_xyzw"]
+    dof_pos = sample["dof_pos"]
+    dof_vel = sample["dof_vel"]
+
+    root_pos = root_xyzw[:, :3].clone()
+    root_ori = _quat_xyzw_to_wxyz(root_xyzw)
+    root_lin_vel = torch.zeros_like(root_pos)
+    root_ang_vel = torch.zeros_like(root_pos)
+
+    # Keep the motion's planar anchor so the reference is above the robot.
+    motion_root_xy = self.body_pos_w[env_ids, 0, :2].clone()
+    root_pos[:, :2] = motion_root_xy
+
+    soft_joint_pos_limits = self.robot.data.soft_joint_pos_limits[env_ids]
+    joint_pos = torch.clip(
+      dof_pos, soft_joint_pos_limits[:, :, 0], soft_joint_pos_limits[:, :, 1]
+    )
+
+    self.robot.write_joint_state_to_sim(joint_pos, dof_vel, env_ids=env_ids)
+    root_state = torch.cat(
+      [root_pos, root_ori, root_lin_vel, root_ang_vel], dim=-1
+    )
+    self.robot.write_root_state_to_sim(root_state, env_ids=env_ids)
+    self.robot.clear_state(env_ids=env_ids)
+    # Rewind reference to the motion start: the task is stand-up + re-track.
+    self.time_steps[env_ids] = 0
+
   def _resample_command(self, env_ids: torch.Tensor):
     if self.cfg.sampling_mode == "start":
       self.time_steps[env_ids] = 0
@@ -396,6 +503,23 @@ class MotionCommand(CommandTerm):
       assert self.cfg.sampling_mode == "adaptive"
       self._adaptive_sampling(env_ids)
 
+    # Re-roll fall-recovery grouping for the resetting envs.
+    self._roll_recovery_groups(env_ids)
+
+    # Fallen-init envs: write lying-on-ground states from the pool and skip
+    # the reference-state reset (reference rewound to motion start).
+    fallen_mask = self.is_fallen_init_env[env_ids]
+    fallen_ids = env_ids[fallen_mask]
+    tracking_ids = env_ids[~fallen_mask]
+
+    if fallen_ids.numel() > 0:
+      self._apply_fallen_init(fallen_ids)
+
+    if tracking_ids.numel() == 0:
+      self.robot.clear_state(env_ids=tracking_ids)
+      return
+
+    env_ids = tracking_ids
     root_pos = self.body_pos_w[:, 0].clone()
     root_ori = self.body_quat_w[:, 0].clone()
     root_lin_vel = self.body_lin_vel_w[:, 0].clone()
@@ -460,6 +584,10 @@ class MotionCommand(CommandTerm):
     env_ids = torch.where(self.time_steps >= self.motion.time_step_total)[0]
     if env_ids.numel() > 0:
       self._resample_command(env_ids)
+
+    # Rolling anchor history for penalty_xy_rate_before_stand.
+    self.prev_anchor_pos = self.current_anchor_pos.clone()
+    self.current_anchor_pos = self.robot_anchor_pos_w.clone()
 
     anchor_pos_w_repeat = self.anchor_pos_w[:, None, :].repeat(
       1, len(self.cfg.body_names), 1
@@ -578,6 +706,15 @@ class MotionCommandCfg(CommandTermCfg):
   adaptive_uniform_ratio: float = 0.1
   adaptive_alpha: float = 0.001
   sampling_mode: Literal["adaptive", "uniform", "start"] = "adaptive"
+  # Fall-recovery training (all zero => plain tracking, behavior unchanged).
+  recovery_env_ratio: float = 0.0
+  """Fraction of envs in the recovery group (fall-window + fallen-init)."""
+  fallen_init_ratio: float = 0.0
+  """Fraction of the recovery group initialized lying on the ground."""
+  init_pos_file: str = ""
+  """Fallen-state .pth pool (KungFuAthleteBot robot_init_states format)."""
+  init_num_diverse: int = 2048
+  """Diverse-pose subsample size for the fallen-init pool."""
 
   @dataclass
   class VizCfg:

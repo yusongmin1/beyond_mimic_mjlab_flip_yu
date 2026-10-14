@@ -298,3 +298,49 @@ def test_delay_buffer_validation(device):
 
   with pytest.raises(ValueError, match="update_period must be >= 0"):
     DelayBuffer(min_lag=0, max_lag=3, batch_size=1, update_period=-1, device=device)
+
+  with pytest.raises(ValueError, match="feature_shape is required"):
+    DelayBuffer(min_lag=0, max_lag=1, batch_size=1, per_feature=True, device=device)
+
+
+def test_per_feature_lags_are_independent(device):
+  """Each feature can return a different historical frame."""
+  buf = DelayBuffer(
+    min_lag=0,
+    max_lag=2,
+    batch_size=1,
+    device=device,
+    per_feature=True,
+    feature_shape=(2,),
+    hold_prob=1.0,  # Keep manually set lags.
+  )
+  frames = [
+    torch.tensor([[1.0, 10.0]], device=device),
+    torch.tensor([[2.0, 20.0]], device=device),
+    torch.tensor([[3.0, 30.0]], device=device),
+  ]
+  for frame in frames:
+    buf.append(frame)
+
+  buf.set_lags(torch.tensor([[0, 2]], device=device))
+  out = buf.compute()
+  # Feature 0 at lag 0 -> 3; feature 1 at lag 2 -> 10.
+  assert torch.allclose(out, torch.tensor([[3.0, 10.0]], device=device))
+
+
+def test_per_feature_set_lags_broadcasts_per_env(device):
+  """Scalar-per-env set_lags broadcasts across features."""
+  buf = DelayBuffer(
+    min_lag=0,
+    max_lag=2,
+    batch_size=2,
+    device=device,
+    per_feature=True,
+    feature_shape=(3,),
+    hold_prob=1.0,
+  )
+  buf.append(torch.zeros(2, 3, device=device))
+  buf.set_lags(torch.tensor([1, 2], device=device))
+  assert torch.equal(
+    buf.current_lags.cpu(), torch.tensor([[1, 1, 1], [2, 2, 2]])
+  )

@@ -60,6 +60,9 @@ class DelayedActuatorCfg(ActuatorCfg):
   delay_per_env_phase: bool = True
   """Whether each environment has a different phase offset."""
 
+  delay_per_feature: bool = False
+  """If True, sample an independent lag for each joint/target in the group."""
+
   def build(
     self, entity: Entity, target_ids: list[int], target_names: list[str]
   ) -> DelayedActuator:
@@ -113,6 +116,7 @@ class DelayedActuator(Actuator[DelayedActuatorCfg]):
     )
 
     # Create independent delay buffer for each target.
+    num_targets = len(self._target_ids_list)
     for target in targets:
       self._delay_buffers[target] = DelayBuffer(
         min_lag=self.cfg.delay_min_lag,
@@ -122,6 +126,8 @@ class DelayedActuator(Actuator[DelayedActuatorCfg]):
         hold_prob=self.cfg.delay_hold_prob,
         update_period=self.cfg.delay_update_period,
         per_env_phase=self.cfg.delay_per_env_phase,
+        per_feature=self.cfg.delay_per_feature,
+        feature_shape=(num_targets,) if self.cfg.delay_per_feature else None,
       )
 
   def compute(self, cmd: ActuatorCmd) -> torch.Tensor:

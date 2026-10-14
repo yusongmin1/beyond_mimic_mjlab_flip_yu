@@ -227,6 +227,95 @@ class negative_knee_power_l2:
     return torch.sum(torch.square(excess), dim=1)
 
 
+class joint_force_exceedance_l2:
+  """Penalize actuator (joint) force magnitude beyond a threshold.
+
+  NOTE: for distal joints driven by small motors, ``actuator_force`` is
+  clamped by the trapezoidal torque-speed envelope (e.g. G1 wrists cap at
+  8.6 / 31.9 N·m), so a threshold above those limits can never trigger. To
+  penalize large hand-ground contact loads use
+  :func:`contact_force_exceedance` with a ContactSensor instead.
+
+  For each selected joint, resolves the controlling actuator by name at init
+  time (guaranteeing force-column alignment even when actuator insertion
+  order differs from joint tree order). Penalizes the excess of the
+  instantaneous actuator force magnitude beyond ``force_threshold`` with an
+  L2-squared kernel:
+
+      sum_j (max(|tau_j| - force_threshold, 0))^2
+
+  Params: asset_cfg (joint_names selects the joints), force_threshold.
+  Use with a negative weight.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+    asset: Entity = env.scene[asset_cfg.name]
+
+    joint_ids, joint_names = asset.find_joints(
+      asset_cfg.joint_names, preserve_order=True
+    )
+    if not joint_ids:
+      raise ValueError(
+        "joint_force_exceedance_l2: no joints matched "
+        f"'{asset_cfg.joint_names}' on entity '{asset_cfg.name}'."
+      )
+
+    actuator_index = {name: i for i, name in enumerate(asset.actuator_names)}
+    missing = [n for n in joint_names if n not in actuator_index]
+    if missing:
+      raise ValueError(
+        f"joint_force_exceedance_l2: joints without a matching actuator: {missing}. "
+        "This term expects one actuator per selected joint."
+      )
+
+    self._asset_name = asset_cfg.name
+    self._actuator_ids = torch.tensor(
+      [actuator_index[n] for n in joint_names], dtype=torch.long, device=env.device
+    )
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+    force_threshold: float = 0.0,
+  ) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    force = asset.data.actuator_force[:, self._actuator_ids]
+    excess = (force.abs() - force_threshold).clamp(min=0.0)
+    return torch.sum(torch.square(excess), dim=1)
+
+
+def contact_force_exceedance(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  force_threshold: float = 0.0,
+) -> torch.Tensor:
+  """Penalize external contact force magnitude on sensor bodies beyond a threshold.
+
+  Reads a ContactSensor (fields must include ``force``; e.g. body-mode
+  primaries vs the terrain with ``reduce="maxforce"``) and returns, per env,
+  the summed linear excess of the per-body contact force magnitude over
+  ``force_threshold``:
+
+      sum_b max(||F_b|| - force_threshold, 0)
+
+  Intended for hand/wrist-ground contact safety: penalizes contact forces
+  beyond a threshold with weight ``-0.01`` (units: penalty per newton of
+  excess, per step). Unlike actuator-force penalties this is NOT clamped by
+  the motor torque envelope, so it reflects the true external impact load.
+  """
+  from mjlab.sensor import ContactSensor  # noqa: PLC0415 — avoid cycle.
+
+  sensor: ContactSensor = env.scene[sensor_name]
+  force = sensor.data.force
+  if force is None:
+    return torch.zeros(env.num_envs, device=env.device)
+  force_mag = torch.linalg.vector_norm(force, dim=-1)  # [B, N]
+  excess = (force_mag - force_threshold).clamp(min=0.0)
+  return torch.sum(excess, dim=1)
+
+
 def flat_orientation_l2(
   env: ManagerBasedRlEnv,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,

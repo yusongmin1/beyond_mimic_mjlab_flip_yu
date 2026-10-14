@@ -1,5 +1,7 @@
 """RL configuration for Unitree G1 tracking task."""
 
+import dataclasses
+
 from mjlab.rl import (
   RslRlModelCfg,
   RslRlOnPolicyRunnerCfg,
@@ -42,4 +44,17 @@ def unitree_g1_tracking_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     save_interval=500,
     num_steps_per_env=24,
     max_iterations=30_000,
+  )
+
+
+def unitree_g1_fall_recovery_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+  """Runner configuration for the G1 fall-recovery tasks.
+
+  Identical to the tracking runner, but logs to a separate
+  ``logs/rsl_rl/g1_fall_recovery/`` directory instead of
+  ``g1_tracking``.
+  """
+  return dataclasses.replace(
+    unitree_g1_tracking_ppo_runner_cfg(),
+    experiment_name="g1_fall_recovery",
   )

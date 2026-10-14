@@ -148,6 +148,84 @@ def head_contact_cost(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
   assert sensor.data.found is not None
   return (sensor.data.found.squeeze(-1) > 0.0).float()
 
+
+def penalty_relative_root_orientation(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+) -> torch.Tensor:
+  """Penalize pelvis orientation error relative to the reference.
+
+  Encourages rolling the pelvis upright first (instead of flailing)
+  during stand-up. KungFuAthleteBot ``penalty_relative_root_orientation``.
+  """
+  command = cast(MotionCommand, env.command_manager.get_term(command_name))
+  error = quat_error_magnitude(
+    command.body_quat_relative_w[:, command.root_index],
+    command.robot_body_quat_w[:, command.root_index],
+  ) ** 2
+  return error.squeeze(-1)
+
+
+def penalty_xy_rate_before_stand(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  stand_threshold: float,
+) -> torch.Tensor:
+  """Penalize horizontal anchor drift while the robot is still fallen.
+
+  Stand-up-gated: the penalty is only active while the shoulders' height
+  error w.r.t. the reference exceeds ``stand_threshold`` (i.e. the robot
+  has not stood up yet). Encourages getting up in place instead of
+  crawling/scooting away. KungFuAthleteBot ``penalty_xy_rate_before_stand``.
+  """
+  command = cast(MotionCommand, env.command_manager.get_term(command_name))
+  error = torch.norm(
+    command.prev_anchor_pos[..., :2] - command.robot_anchor_pos_w[..., :2], dim=1
+  )
+  diff = torch.norm(
+    (
+      command.body_pos_relative_w[:, command.shoulders_indexes, 2]
+      - command.robot_body_pos_w[:, command.shoulders_indexes, 2]
+    ),
+    dim=-1,
+  )
+  return torch.where(
+    diff > stand_threshold, error, torch.tensor(0.0, device=error.device, dtype=error.dtype)
+  )
+
+
+def reward_reference_height_before_stand(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  stand_threshold: float,
+  std: float = 0.25,
+) -> torch.Tensor:
+  """Reward matching the reference root height while still fallen.
+
+  Stand-up-gated (same gate as ``penalty_xy_rate_before_stand``): active
+  only while the shoulders' height error w.r.t. the reference exceeds
+  ``stand_threshold`` (i.e. the robot is lying down / getting up).
+  Rewards the pelvis height tracking the reference so the robot rises
+  toward the reference posture instead of staying flat on the ground.
+  """
+  command = cast(MotionCommand, env.command_manager.get_term(command_name))
+  diff = torch.norm(
+    (
+      command.body_pos_relative_w[:, command.shoulders_indexes, 2]
+      - command.robot_body_pos_w[:, command.shoulders_indexes, 2]
+    ),
+    dim=-1,
+  )
+  error_sq = torch.square(
+    command.body_pos_relative_w[:, command.root_index, 2]
+    - command.robot_body_pos_w[:, command.root_index, 2]
+  ).squeeze(-1)
+  reward = torch.exp(-error_sq / std**2)
+  return torch.where(
+    diff > stand_threshold, reward, torch.tensor(0.0, device=reward.device, dtype=reward.dtype)
+  )
+
+
 def motion_joint_torque_error_exp(
   env: ManagerBasedRlEnv,
   command_name: str,

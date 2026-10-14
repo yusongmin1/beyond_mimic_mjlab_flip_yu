@@ -196,6 +196,31 @@ do
 done
 ```
 
+**Resume（断点续训）**：`--agent.resume True` 恢复模型权重、优化器状态、
+迭代计数与环境步数计数器；`--agent.load-run` 是匹配
+`logs/rsl_rl/g1_tracking/` 下 run 目录名的**正则**（按字母序取最新匹配，
+如 `.*g1_motion_long_08` → `2026-10-12_02-53-05_g1_motion_long_08`），
+省略时自动选最新 run；`--agent.load-checkpoint` 默认 `model_.*.pt` 取最新
+checkpoint；`--agent.max-iterations` 是**新的总目标轮数**（从已恢复的迭代
+继续）：
+
+```bash
+python -m mjlab.scripts.train \
+  Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
+  --env.commands.motion.motion-file "$PWD/motions/omnixtreme/g1_motion_long_01.npz" \
+  --env.scene.num-envs 4096 \
+  --agent.max-iterations 20000 \
+  --agent.run-name "g1_motion_long_01" \
+  --agent.resume True \
+  --agent.load-run ".*g1_motion_long_01"
+```
+
+指定具体 checkpoint（如从 `model_7000.pt` 续训）：
+
+```bash
+  --agent.load-checkpoint "model_7000.pt"
+```
+
 ```bash
 python -m mjlab.scripts.play \
   Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
@@ -233,65 +258,157 @@ vs 地面的接触传感器，play 中实时打印接触 link 与法向力大小
 可选参数：`--hand-contact-bodies <regex>`（默认
 `(left|right)_wrist_(pitch|roll|yaw)_link`）、`--hand-contact-min-force <N>`。
 
-### G1 Dance 任务（倒地恢复实验入口）
+### G1 Dance Fall-Recovery 任务（倒地恢复实验入口）
 
-**该任务用于后续倒地恢复（fall-and-get-up）实验**：基于
+**倒地恢复（fall-and-get-up）训练任务**：基于
 `tracking_env_cfg_dance.py` 的宽松锚点奖励配置（root_pos 1.0 / root_ori 0.5），
-后续将在此任务上叠加放松终止条件、躺倒惩罚等倒地恢复训练改动。
-执行器已启用梯形力矩-速度包络（见下节）。当前动作数据仅一个：
+执行器已启用梯形力矩-速度包络（见下节）。当前动作数据：
 `motions/dance1_subject2.npz`。
+
+原来的普通 Dance 任务（`Mjlab-Tracking-Flat-Unitree-G1-Dance` 与
+No-State-Estimation 变体）**已删除**，请改用 Fall-Recovery 任务。
+带状态估计版本：`Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery`；
+无状态估计版本：`Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation`。
+
+#### 环境分组（50% / 25% / 25%）
+
+| 组 | 比例 | 行为 |
+| :--- | :--- | :--- |
+| 正常跟踪 | 50% | 标准 BeyondMimic 式跟踪，摔倒即终止 |
+| 倒地窗口组 | 25% | 正常起步，摔倒后获得起身窗口（AMP_mjlab 式延迟终止 + torso 向上助力） |
+| 躺倒初始化组 | 25% | reset 时直接从预采集的多样躺倒状态池初始化（KungFuAthleteBot 式 `.pth` 池） |
+
+关键参数（`config/g1/env_cfgs.py` 中 `enable_fall_recovery=True` 分支）：
+
+- `recovery_env_ratio=0.5`：恢复组占比（组内再对半分窗口组 / 躺倒初始化组）；
+- `fallen_init_ratio=0.5`：恢复组中躺倒初始化的比例；
+- `bad_tracking_time_threshold_s=2.0` + `max_recovery_steps=100`（@50Hz）：
+  容忍终止 2 s + 延迟窗口 2 s，**总起身窗口 4 s**；
+- `recovery_assist_initial_force=250 N`：torso 向上助力，窗口过半后施加，
+  随训练迭代每 500 iter 衰减 20 N，至 0 撤出（课程式退火）；
+- 躺倒池：`src/mjlab/tasks/tracking/assets/robot_init_states_g1_8192.pth`。
+
+#### 爬起奖励塑形（仅倒地状态激活，KungFuAthleteBot 风格门控）
+
+三个 stand-up 塑形项共用同一门控：肩部高度误差（相对参考）> 0.1 m
+即视为"还没站起来"，此时激活；站起后归零，不干扰正常跟踪奖励。
+
+| 奖励项 | 权重 | 作用 |
+| :--- | :--- | :--- |
+| `penalty_relative_root_orientation` | −0.5 | pelvis 相对参考的姿态误差平方——骨盆先转正，不要乱滚 |
+| `penalty_xy_rate_before_stand` | −1.0 | 起身前 anchor 水平漂移——原地爬起，不要边爬边蹭走 |
+| `reward_reference_height_before_stand` | +2.5 | pelvis 高度贴近参考（`exp(−误差²/0.25²)`）——正向鼓励站起 |
+
+实现位于 `src/mjlab/tasks/tracking/mdp/rewards.py`；门控与依赖索引
+（`root_index` / `shoulders_indexes` / `prev_anchor_pos`）在
+`mdp/commands.py` 的 `MotionCommand` 上维护。
+
+#### 日志目录
+
+Fall-Recovery 任务日志独立保存到 **`logs/rsl_rl/g1_fall_recovery/`**
+（不复用 `g1_tracking/`），由 `rl_cfg.py` 的
+`unitree_g1_fall_recovery_ppo_runner_cfg()` 定义，PPO 超参与跟踪任务完全一致。
+
+#### 训练 / 续训 / 播放
 
 ```bash
 conda activate env_isaaclab
 cd /home/zju/Downloads/mjlab-dev-go2-mimic
-export PYTHONPATH=src
-```
-
-**训练**:
-
-```bash
-python -m mjlab.scripts.train \
-  Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation \
+PYTHONPATH=src python src/mjlab/scripts/train.py \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery \
   --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
   --env.scene.num-envs 4096 \
   --agent.max-iterations 10000 \
   --agent.run-name "dance1_subject2"
 ```
 
-带状态估计版本用任务 ID `Mjlab-Tracking-Flat-Unitree-G1-Dance`。
-日志位于 `logs/rsl_rl/g1_tracking/dance1_subject2/`。
+**Resume（断点续训）**：参数含义同 G1 跟踪任务，但 run 目录匹配的是
+`logs/rsl_rl/g1_fall_recovery/`（省略时自动取最新）：
 
-**播放**：
+```bash
+python -m mjlab.scripts.train \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery \
+  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
+  --env.scene.num-envs 4096 \
+  --agent.max-iterations 30000 \
+  --agent.run-name "dance1_subject2" \
+  --agent.resume True \
+  --agent.load-run ".*dance1_subject2"
+```
+
+**播放**（play 模式下躺倒初始化组关闭、保留容忍终止，可手动推倒后
+观察自行爬起）：
 
 ```bash
 python -m mjlab.scripts.play \
-  Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation \
   --motion-file $PWD/motions/dance1_subject2.npz \
   --keep-randomization True
 ```
 
 
-#### 域随机化（Go2 与 G1）
+#### 域随机化（Go2 与 G1，及多仓库对比）
 
 跟踪任务继承 `tracking_env_cfg.py` 中的随机化配置；Go2 / G1 的任务配置
 仅按机器人调整名称或开关附加项。两机器人共有：间隔速度推扰、启动期
 质心 / 体重 / PD 增益 / 编码器偏置 / 足端摩擦随机化，以及动作初始状态
 （RSI）姿态 / 速度 / 关节位置范围、actor 观测噪声、执行器延迟（如标注）。
 
-| 随机化项 | 模式 | 数值 / 范围 | Go2 | G1 |
-| :--- | :---: | :--- | :---: | :---: |
-| 速度推扰 `push_robot` | 间隔 1–3 s | 线速度 ±0.5/±0.5/±0.2 m/s，角速度 ±0.52/±0.52/±0.78 rad/s | ✓ | ✓ |
-| 垂直推扰 `push_robot_2`（可选） | 间隔 1–2 s | z 向 0–3 m/s，概率 0.8→0 衰减 | 可选 | 可选 |
-| 质心偏移 `base_com` | 启动 | `trunk` / `torso_link` 上 ±0.025/±0.03/±0.03 m | ✓ | ✓ |
-| 附加体重 `add_body_mass` | 启动 | `trunk` / `torso_link` 上加 −1.0…+2.0 kg | ✓ | ✓ |
-| PD 增益 `actuator_gains` | 启动 | kp、kd ×0.9–1.1 | ✓ | ✓ |
-| 编码器偏置 | 启动 | ±0.015 rad | ✓ | ✓ |
-| 足端摩擦 | 启动 | ×0.3–1.2，四足共享（`[FR][LR]_foot` / `^(left|right)_foot[1-7]`） | ✓ | ✓ |
-| 执行器延迟 | 启动时包装 | 位置延迟 0–3 个物理步 | ✓（开关） | ✓ |
-| RSI 姿态范围 | reset | x,y ±0.05 m；z ±0.01 m；roll/pitch ±0.1、yaw ±0.2 rad | ✓ | ✓ |
-| RSI 速度范围 | reset | 与推扰范围相同 | ✓ | ✓ |
-| RSI 关节位置 | reset | ±0.1 rad | ✓ | ✓ |
-| 观测噪声（actor） | 每步 | 锚点位置 ±0.25、姿态 ±0.05、线速度 ±0.5、角速度 ±0.2、关节位置 ±0.01、关节速度 ±0.5 | ✓ | ✓ |
+下表将本仓库与四个来源的域随机化并排对比：
+
+- **本仓库**：`src/mjlab/tasks/tracking/tracking_env_cfg.py`（Go2 与 G1 数值一致，差异以括号注明）；
+- **mimic_mjlab-main**：`/home/zju/lab/mimic/mimic_mjlab-main/src/tasks/tracking/tracking_env_cfg.py`；
+- **KungFuAthleteBot-main**：`unitree_rl_mjlab/src/tasks/tracking/tracking_env_cfg.py`（跟踪任务；另附 `holosoma_min` 全身跟踪预设）；
+- **Go2_Cts**：`/home/zju/My_unitree_go2_gym/legged_gym/envs/Go2_Cts/Go2_Cts_Config.py`（legged_gym 速度指令任务，CTS 特权学习）；
+- **OmniXtreme 二阶段**：arXiv:2602.23843 Table I "Aggressive" 列（残差后训练阶段，常规项较一阶段最多放大 50%）。
+
+| 随机化项 | 本仓库（Go2/G1） | mimic_mjlab-main | KungFuAthleteBot | Go2_Cts（legged_gym） | OmniXtreme 二阶段（激进） |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **观测噪声（actor）** | | | | | |
+| 关节位置 | ±0.01 rad（叠加编码器偏置） | ±0.04 rad（叠加偏置） | ±0.01 rad（叠加偏置） | 0.01 rad | ±0.01 rad |
+| 关节速度 | ±0.5 rad/s | ±0.6 rad/s | ±0.5 rad/s | 1.5 rad/s | ±0.5 rad/s |
+| IMU 角速度 | ±0.2 rad/s | ±0.2 rad/s | ±0.2 rad/s | 0.2 rad/s | ±0.2 rad/s |
+| IMU 线速度 | ±0.5 m/s | ±0.3 m/s | ±0.5 m/s | 0.1 m/s | — |
+| 姿态参考噪声（锚点姿态 / torso 6D） | ±0.05 | ±0.05 | ±0.05 | — | ±0.05 |
+| 重力方向 / 地形高度 | — | — | — | 0.05 / 0.1 | — |
+| **接触与物理参数（启动期）** | | | | | |
+| 足端摩擦 | [0.3, 1.2]，四足共享 | [0.3, 1.6]，共享 | 静 [0.3, 1.6] / 动 [0.3, 1.2]（holosoma 全身预设） | [0.2, 1.25] | 静 [0.3, 1.6] / 动 [0.3, 1.2] |
+| 恢复系数 | — | — | [0.0, 0.5]（holosoma 全身预设） | [0.0, 1.0] | [0.0, 0.5] |
+| 质心偏移 | x ±0.025、y/z ±0.05 m | x/y/z ±0.05 m | x ±0.025、y/z ±0.05 m | ±0.05 m（三轴） | x ±0.025、y/z ±0.05 m |
+| 附加质量 | `trunk`/`torso_link` −1…+2 kg | 全身 −3…+5 kg（0–2 kg 载荷） | loco 预设：链接 ×[0.9, 1.2]、底盘 −1…+3 kg | 底盘 −1…+2 kg、链接 ×[0.9, 1.1] | — |
+| 转动惯量 | — | 伪惯量 α∈[−0.112, 0.091]（≈0.8–1.2× 质量） | loco 预设：Ixx ×[0.5, 1.5] | — | — |
+| PD 增益 | kp、kd ×0.9–1.1（Go2 可开关） | kp ×0.9–1.1、kd ×0.8–1.2 | ×[0.9, 1.1]（默认关闭） | kp/kd ×[0.9, 1.1] | — |
+| 电机力矩 | — | 力矩上限 ×0.85–1.0 | — | 力矩 ×[0.8, 1.2] | — |
+| 关节阻尼 / 摩擦 / armature | — | 阻尼 ×0.7–1.3、摩擦loss 0–0.3、armature ×0.9–1.1 | — | armature 固定（hip 0.00448 / calf 0.01652，不随机） | — |
+| 编码器偏置 / 电机零点 | ±0.015 rad | ±0.015 rad | ±0.01 rad | 电机零点偏移 ±0.035 rad | ±0.01 rad（默认标定） |
+| **过程扰动与延迟** | | | | | |
+| 速度推扰 | 间隔 1–3 s；xy ±0.5、z ±0.2 m/s，RP ±0.52、Y ±0.78 rad/s | 间隔 1–3 s；x ±1.0、y ±0.5、z ±0.4 m/s，RP ±0.52、Y ±0.78 rad/s | 间隔 1–3 s；xy ±0.5、z ±0.2，RP ±0.52、Y ±0.78 | 间隔 4 s；xy ±0.4 m/s、角速度 ±0.6 rad/s | 间隔 1–3 s；xy ±0.5、z ±0.2，RP ±0.52、Y ±0.78 |
+| 动作延迟 | 位置延迟 0–3 物理步（≈0–15 ms，Go2/G1 可开关） | — | [0, 1] 控制步（默认关闭） | 0–decimation 子步内随机切换点（HIMLoco 式） | [5, 10] ms |
+| 负功率惩罚 | ✓ G1 膝关节（150 W 死区 / 500 归一 / 权重 −10） | — | — | — | ✓ 膝关节（150 W 死区） |
+| **初始状态（RSI / reset）** | | | | | |
+| 初始姿态 | x,y ±0.05 m、z ±0.01 m、RP ±0.1、yaw ±0.2 rad | 同左 | 同左 | 固定初始位姿 | ±0.15 rad（一阶段 ±0.1 放大 50%） |
+| 初始速度 | 与推扰范围相同 | 与推扰范围相同 | 与推扰范围相同 | 全轴 ±0.5 | xy ±0.75、z ±0.3 m/s，RP ±0.78、Y ±1.17 rad/s（放大 50%） |
+| 初始关节位置 | ±0.1 rad | ±0.1 rad | ±0.1 rad | 0.5–1.5× 默认关节角 | ±0.15 rad（放大 50%） |
+| **地形与终止** | | | | | |
+| 地形随机化 | 平地（plane） | 平地（plane） | 平地（plane） | trimesh 粗糙地形（斜坡 / 台阶课程） | 表面噪声 [0, 0.01] m + 随机 0.01 m 竖直台阶 |
+| 终止阈值 | 锚点 z 误差 0.5 m / 姿态 0.8 rad / EE z 0.5 m | z 0.4 / 姿态 0.8 | z 0.25 / 姿态 0.8 / EE z 0.25 | 躯干接触即终止 | 放宽 1.5×：z 0.375 m / 姿态 1.2 rad |
+| 特有机制 | Go2 `add_body_mass`/`actuator_gains` 可开关；G1 增加膝关节负功率惩罚 | 观测噪声最大（关节位置 ±0.04） | 双算法（PPO / FastSAC）+ holosoma 全身跟踪预设 | critic 特权观测含 42 维域随机参数（teacher-student） | 二阶段为**残差后训练**：常规随机化上限 +50%，容忍大偏差可恢复状态 |
+
+要点：
+
+1. **本仓库 ≈ KungFuAthleteBot 跟踪任务** 的随机化水平（同为 mjlab 系、
+   BeyondMimic 风格），并额外加入执行器延迟（0–3 物理步）与 G1 膝关节
+   负功率惩罚；
+2. **mimic_mjlab-main** 覆盖维度最广（伪惯量、关节阻尼 / 摩擦 / armature、
+   力矩上限），推扰 x 向达 ±1.0 m/s，适合大范围 sim-to-real 但训练更难；
+3. **Go2_Cts** 是速度指令任务而非动作跟踪，随机化集中在执行链路
+   （力矩 ×[0.8, 1.2]、电机零点 ±0.035 rad、子步延迟），并以 42 维特权
+   域随机参数显式喂给 critic；
+4. **OmniXtreme 二阶段（Aggressive）** 只在残差后训练启用：噪声与常规
+   随机化基本沿用一阶段（Moderate），**放大的是初始状态（+50%）与
+   终止阈值（×1.5）**，并新增恢复系数 [0, 0.5]、动作延迟 [5, 10] ms、
+   地形噪声 / 台阶与膝关节负功率惩罚——目的是让残差策略在“大偏差但
+   可恢复”的状态上学会纠正。
 
 播放模式移除推扰与 RSI 范围；`--keep-randomization True` 在播放时保留
 训练期随机化（Go2）。
@@ -367,9 +484,10 @@ done
 - [x] 电机力矩转速曲线的梯形包络
 - [x] 负功率限制(omnixtreme)
 - [x] 添加后空翻等极限动作
-- [] 手部接触的力进行限制
-- [] 逐渐收紧的终止条件
+- [x] 手部接触的力进行限制
 - [] 查尔斯顿舞的长序列动作(3min) 倒地恢复的力课程
+- [] 手部抬到上面去
+- [] 逐渐收紧的终止条件
 - [] 统一的奖励系数
 - [] 更高的抗扰性，地形，
 - [] 更强的跟踪能力(适应模块)

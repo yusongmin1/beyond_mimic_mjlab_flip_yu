@@ -28,7 +28,8 @@ def unitree_go2_flat_tracking_env_cfg(
     play: Disable episode timeout / DR used during interactive play.
     enable_body_mass_rand: Startup body-mass add randomization.
     enable_actuator_gains_rand: Startup PD gain scale randomization.
-    enable_actuator_delay: Wrap actuators with 0–3 physics-step delay.
+    enable_actuator_delay: Wrap actuators with 0–3 physics-step delay
+      (independent lag per joint).
   """
   cfg = make_tracking_env_cfg()
 
@@ -43,6 +44,7 @@ def unitree_go2_flat_tracking_env_cfg(
           delay_target="position",
           delay_min_lag=0,
           delay_max_lag=3,
+          delay_per_feature=True,
         )
         for act in articulation.actuators
       ),
@@ -90,6 +92,10 @@ def unitree_go2_flat_tracking_env_cfg(
   # Negative knee power penalty is G1-only (added in g1 env_cfgs; Go2 has no
   # *_knee_joint naming and different actuator groups).
   cfg.rewards.pop("neg_power_knee", None)
+
+  # Wrist force-limit penalty is G1-only (added in g1 env_cfgs; Go2 has no
+  # wrist joints).
+  cfg.rewards.pop("wrist_force_limit", None)
 
   # Go2 has no head — remove head contact penalty term.
   cfg.rewards.pop("head_contact", None)

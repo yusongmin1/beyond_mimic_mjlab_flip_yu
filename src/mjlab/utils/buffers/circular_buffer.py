@@ -218,7 +218,10 @@ class CircularBuffer:
     """Retrieve lagged frames per batch (LIFO).
 
     Args:
-      key: Per-batch lags (Tensor) or shared lag (int). Shape (batch_size,) or scalar.
+      key: Lag specification:
+        - ``int`` / scalar: same lag for every batch row
+        - shape ``(batch_size,)``: one lag per environment (all features share it)
+        - shape ``(batch_size, *feature_dims)``: independent lag per feature
     """
     if self._buffer is None:
       raise RuntimeError("Buffer not initialized. Call append() first.")
@@ -230,14 +233,42 @@ class CircularBuffer:
         key = key.expand(self._batch_size)
       key = key.to(device=self._device, dtype=torch.long)
 
-    if key.numel() != self._batch_size:
-      raise ValueError(f"Expected {self._batch_size} lags, got {key.numel()}")
+    if key.shape[0] != self._batch_size:
+      raise ValueError(
+        f"Expected lag batch size {self._batch_size}, got {key.shape[0]}"
+      )
+
+    feature_shape = self._buffer.shape[2:]
+    if key.ndim == 1:
+      pushes = self._num_pushes.clamp_min(1)
+      valid = torch.minimum(key, pushes - 1).clamp_min(0)
+
+      if torch.all(valid == 0):
+        return self._buffer[self._pointer]
+
+      idx = torch.remainder(self._pointer - valid, self._max_len)
+      return self._buffer[idx, self._all_indices]
+
+    # Per-feature lags: key shape must match (batch_size, *feature_dims).
+    if key.shape[1:] != feature_shape:
+      raise ValueError(
+        f"Expected lag shape {(self._batch_size, *feature_shape)}, got {tuple(key.shape)}"
+      )
 
     pushes = self._num_pushes.clamp_min(1)
+    pushes = pushes.view(self._batch_size, *([1] * len(feature_shape)))
     valid = torch.minimum(key, pushes - 1).clamp_min(0)
 
     if torch.all(valid == 0):
       return self._buffer[self._pointer]
 
-    idx = torch.remainder(self._pointer - valid, self._max_len)
-    return self._buffer[idx, self._all_indices]
+    flat_valid = valid.reshape(self._batch_size, -1)
+    num_features = flat_valid.shape[1]
+    buf_flat = self._buffer.reshape(self._max_len, self._batch_size, num_features)
+    time_idx = torch.remainder(self._pointer - flat_valid, self._max_len)
+    batch_idx = self._all_indices.unsqueeze(1).expand(self._batch_size, num_features)
+    feat_idx = torch.arange(num_features, device=self._device).unsqueeze(0).expand(
+      self._batch_size, num_features
+    )
+    out = buf_flat[time_idx, batch_idx, feat_idx]
+    return out.reshape(self._batch_size, *feature_shape)
