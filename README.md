@@ -181,7 +181,6 @@ export PYTHONPATH=src
 ```bash
 for motion in \
   omnixtreme/g1_motion_long_01\
-  omnixtreme/g1_motion_long_06 \
   omnixtreme/g1_motion_long_08 \
   omnixtreme/g1_motion_long_10 \
   omnixtreme/g1_motion_long_13
@@ -191,7 +190,7 @@ do
     Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
     --env.commands.motion.motion-file "$PWD/motions/${motion}.npz" \
     --env.scene.num-envs 4096 \
-    --agent.max-iterations 10000 \
+    --agent.max-iterations 15000 \
     --agent.run-name "$(basename $motion)"
 done
 ```
@@ -463,16 +462,17 @@ cd /home/zju/Downloads/mjlab-dev-go2-mimic
 export PYTHONPATH=src MUJOCO_GL=egl
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH:-}"
 for motion in \
-    88_06_stageii_unitree_g1 \
-    90_08_stageii_unitree_g1 \
-    90_15_stageii_unitree_g1
+    g1_kick_combo \
+    g1_spinkick \
+    g1_cartwheel2 
+
 do
   echo "========== Training $motion =========="
   python -m mjlab.scripts.train \
     Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
-    --env.commands.motion.motion-file "$PWD/motions/chunwan/${motion}.npz" \
+    --env.commands.motion.motion-file "$PWD/motions/mimickit/${motion}.npz" \
     --env.scene.num-envs 4096 \
-    --agent.max-iterations 10000 \
+    --agent.max-iterations 15000 \
     --agent.run-name "chunwan_${motion}" \
     --gpu-ids '[0]'
 done

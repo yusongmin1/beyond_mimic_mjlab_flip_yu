@@ -321,6 +321,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
     "anchor_pos": TerminationTermCfg(
       func=mdp.bad_anchor_pos_z_only,
       params={"command_name": "motion", "threshold": 0.5},
+      # params={"command_name": "motion", "threshold": 0.3},
     ),
     "anchor_ori": TerminationTermCfg(
       func=mdp.bad_anchor_ori,

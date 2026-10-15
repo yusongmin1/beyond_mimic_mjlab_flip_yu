@@ -1,9 +1,10 @@
 """Render G1 motion .npz files to MP4 videos with MuJoCo offscreen renderer.
 
-Replays joint_pos trajectories frame-by-frame through MuJoCo forward
-kinematics and writes one MP4 per clip. Works for any G1 npz under
-``motions/`` (mimickit / chunwan / amass_hard / 100style formats — all share
-29 joints in mjlab G1 order).
+Replays joint_pos trajectories frame-by-frame through the FULL tracking
+scene (same terrain entity, lighting, and camera as convert_mimickit's
+--render output, e.g. motions/g1_cartwheel2.mp4): bright directional light,
+blue checkered floor, close ASSET_ROOT-tracking camera
+(distance=2.0, elevation=-5, azimuth=20).
 """
 
 from __future__ import annotations
@@ -11,13 +12,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import mediapy as media
-import mujoco
 import numpy as np
+import torch
 import tyro
 
 import mjlab
-from mjlab.asset_zoo.robots.unitree_g1.g1_constants import get_g1_robot_cfg
-from mjlab.entity import Entity
+from mjlab.scene import Scene
+from mjlab.sim.sim import Simulation, SimulationCfg
+from mjlab.viewer.offscreen_renderer import OffscreenRenderer
+from mjlab.viewer.viewer_config import ViewerConfig
 
 G1_JOINT_NAMES = (
   "left_hip_pitch_joint",
@@ -52,41 +55,28 @@ G1_JOINT_NAMES = (
 )
 
 
-def build_g1_model(width: int = 640, height: int = 360) -> tuple[mujoco.MjModel, list[int]]:
-  """Compile standalone G1 model with a ground plane; return model + addrs."""
-  robot = Entity(get_g1_robot_cfg())
-  while robot.spec.keys:
-    robot.spec.delete(robot.spec.keys[0])
-  spec = robot.spec
-  # Add a ground plane at z=0 so foot clearance is visible in videos.
-  spec.worldbody.add_geom(
-    name="ground_plane",
-    type=mujoco.mjtGeom.mjGEOM_PLANE,
-    size=(0, 0, 0.01),  # Infinite plane (x/y halfsize 0).
-    rgba=(0.55, 0.6, 0.65, 1.0),
+def _make_scene(output_fps: int, device: str) -> tuple[Scene, Simulation]:
+  """Same tracking scene as convert_mimickit._make_scene (g1 branch)."""
+  from mjlab.tasks.tracking.config.g1.env_cfgs import (
+    unitree_g1_flat_tracking_env_cfg,
   )
-  model = spec.compile()
-  model.vis.global_.offwidth = width
-  model.vis.global_.offheight = height
-  joint_qpos_addrs: list[int] = []
-  for name in G1_JOINT_NAMES:
-    jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
-    if jid < 0:
-      raise ValueError(f"Joint '{name}' not found in G1 model.")
-    joint_qpos_addrs.append(int(model.jnt_qposadr[jid]))
-  return model, joint_qpos_addrs
+
+  env_cfg = unitree_g1_flat_tracking_env_cfg()
+  scene = Scene(env_cfg.scene, device=device)
+  model = scene.compile()
+  sim_cfg = SimulationCfg()
+  sim_cfg.mujoco.timestep = 1.0 / output_fps
+  sim = Simulation(num_envs=1, cfg=sim_cfg, model=model, device=device)
+  scene.initialize(sim.mj_model, sim.model, sim.data)
+  return scene, sim
 
 
 def render_npz(
   npz_path: Path,
-  model: mujoco.MjModel,
-  data: mujoco.MjData,
-  joint_qpos_addrs: list[int],
+  sim: Simulation,
+  scene: Scene,
+  renderer: OffscreenRenderer,
   out_path: Path,
-  width: int,
-  height: int,
-  camera: str,
-  follow: bool,
   every_nth: int,
 ) -> None:
   d = np.load(npz_path)
@@ -95,65 +85,77 @@ def render_npz(
   root_quat = d["body_quat_w"][:, 0, :]
   fps = float(d["fps"][0]) / every_nth
 
-  renderer = mujoco.Renderer(model, height=height, width=width)
-  cam = mujoco.MjvCamera()
+  robot_entity = scene["robot"]
+  robot_joint_indexes = robot_entity.find_joints(G1_JOINT_NAMES, preserve_order=True)[0]
+
   frames: list[np.ndarray] = []
-
+  scene.reset()
   for i in range(0, joint_pos.shape[0], every_nth):
-    data.qpos[:] = 0.0
-    data.qpos[0:3] = root_pos[i]
-    data.qpos[3:7] = root_quat[i]
-    for j, adr in enumerate(joint_qpos_addrs):
-      data.qpos[adr] = joint_pos[i, j]
-    mujoco.mj_forward(model, data)
+    root_states = robot_entity.data.default_root_state.clone()
+    root_states[:, 0:3] = torch.as_tensor(root_pos[i], device=sim.device)
+    root_states[:, :2] += scene.env_origins[:, :2]
+    root_states[:, 3:7] = torch.as_tensor(root_quat[i], device=sim.device)
+    robot_entity.write_root_state_to_sim(root_states)
 
-    if follow:
-      # Chase camera: fixed offset behind/above, lookat follows the root.
-      cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-      cam.lookat[:] = root_pos[i]
-      cam.distance, cam.azimuth, cam.elevation = 4.0, 130.0, -15.0
-      renderer.update_scene(data, camera=cam)
-    else:
-      renderer.update_scene(data, camera=camera)
+    jp = robot_entity.data.default_joint_pos.clone()
+    jv = robot_entity.data.default_joint_vel.clone()
+    jp[:, robot_joint_indexes] = torch.as_tensor(joint_pos[i], device=sim.device)
+    robot_entity.write_joint_state_to_sim(jp, jv)
+
+    sim.forward()
+    scene.update(sim.mj_model.opt.timestep)
+
+    renderer.update(sim.data)
     frames.append(renderer.render())
 
   out_path.parent.mkdir(parents=True, exist_ok=True)
   media.write_video(str(out_path), frames, fps=round(fps))
-  renderer.close()
 
 
 def main(
   input_dir: str = "motions",
   output_dir: str = "videos/g1_motions",
-  width: int = 1280,
-  height: int = 720,
-  camera: str = "track",
-  follow: bool = True,
+  width: int = 640,
+  height: int = 480,
   every_nth: int = 1,
   skip_existing: bool = True,
   pattern: str = "*.npz",
+  device: str = "cuda:0",
 ) -> None:
   """Render all G1 motion npz under input_dir (recursively) to MP4.
 
-  Only clips with 29 joints are rendered (G1); others are skipped.
-  Output mirrors the input subdirectory layout under output_dir.
+  Uses the full tracking scene renderer (same visuals as the
+  g1_cartwheel2.mp4 reference): bright light, blue checkered floor,
+  close tracking camera.
 
   Args:
     input_dir: Root directory to search for .npz motions.
     output_dir: Directory to write .mp4 videos.
     width: Video width in pixels.
     height: Video height in pixels.
-    camera: MuJoCo camera name (use "track" with follow=True).
-    follow: Track the root body with a fixed-offset chase camera.
     every_nth: Render every Nth frame (1 = full fps).
     skip_existing: Skip videos that already exist.
     pattern: Glob pattern for npz files.
+    device: Compute device for the scene.
   """
   root = Path(input_dir)
   out_root = Path(output_dir)
 
-  model, joint_qpos_addrs = build_g1_model(width=width, height=height)
-  data = mujoco.MjData(model)
+  if device.startswith("cuda") and not torch.cuda.is_available():
+    print("[WARNING]: CUDA unavailable, falling back to CPU.")
+    device = "cpu"
+
+  scene, sim = _make_scene(output_fps=50, device=device)
+  viewer_cfg = ViewerConfig(
+    height=height,
+    width=width,
+    origin_type=ViewerConfig.OriginType.ASSET_ROOT,
+    distance=2.0,
+    elevation=-5.0,
+    azimuth=20,
+  )
+  renderer = OffscreenRenderer(model=sim.mj_model, cfg=viewer_cfg, scene=scene)
+  renderer.initialize()
 
   npzs = sorted(p for p in root.rglob(pattern))
   rendered = skipped = passed = 0
@@ -176,18 +178,15 @@ def main(
     print(f"[RENDER] {npz_path} -> {out_path}")
     render_npz(
       npz_path=npz_path,
-      model=model,
-      data=data,
-      joint_qpos_addrs=joint_qpos_addrs,
+      sim=sim,
+      scene=scene,
+      renderer=renderer,
       out_path=out_path,
-      width=width,
-      height=height,
-      camera=camera,
-      follow=follow,
       every_nth=every_nth,
     )
     rendered += 1
 
+  renderer.close()
   print(
     f"[INFO]: rendered={rendered} skipped={skipped} non-g1={passed} "
     f"out={out_root.resolve()}"
