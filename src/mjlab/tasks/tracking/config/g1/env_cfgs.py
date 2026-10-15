@@ -351,7 +351,10 @@ def _apply_g1_overrides(
         interval_range_s=(0.02, 0.02),  # == step_dt (decimation 4 @ 200Hz).
         params={
           "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",)),
-          "trigger_recovery_steps": max(1, max_recovery_steps // 2),
+          # Fire on the first delayed-recovery step (counter==1), i.e. right
+          # when TolerantTermination announces failure — not at window midpoint.
+          # Waiting until max_recovery_steps//2 leaves too little time to stand.
+          "trigger_recovery_steps": 1,
           "apply_prob": 0.8,
           "initial_force": recovery_assist_initial_force,
           "duration_steps": 25,

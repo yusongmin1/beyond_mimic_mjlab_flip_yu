@@ -283,7 +283,8 @@ No-State-Estimation 变体）**已删除**，请改用 Fall-Recovery 任务。
 - `fallen_init_ratio=0.5`：恢复组中躺倒初始化的比例；
 - `bad_tracking_time_threshold_s=2.0` + `max_recovery_steps=100`（@50Hz）：
   容忍终止 2 s + 延迟窗口 2 s，**总起身窗口 4 s**；
-- `recovery_assist_initial_force=250 N`：torso 向上助力，窗口过半后施加，
+- `recovery_assist_initial_force=250 N`：torso 向上助力，在 Layer1 宣布失败后
+  **立即**施加（`trigger_recovery_steps=1`，不再等窗口中点），持续 0.5 s，
   随训练迭代每 500 iter 衰减 20 N，至 0 撤出（课程式退火）；
 - 躺倒池：`src/mjlab/tasks/tracking/assets/robot_init_states_g1_8192.pth`。
 

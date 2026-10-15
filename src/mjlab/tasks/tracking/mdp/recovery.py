@@ -210,7 +210,7 @@ def apply_recovery_assist_force(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor | None,
   asset_cfg: SceneEntityCfg,
-  trigger_recovery_steps: int = 50,
+  trigger_recovery_steps: int = 1,
   apply_prob: float = 0.8,
   initial_force: float = 250.0,
   duration_steps: int = 25,
@@ -220,10 +220,13 @@ def apply_recovery_assist_force(
   Should be registered with ``mode="interval"`` and
   ``interval_range_s=(env.step_dt, env.step_dt)`` so it fires every env step.
 
-  Adapted from AMP_mjlab ``apply_recovery_assist_force``: when a recovery
-  env's counter first hits ``trigger_recovery_steps``, sample ``apply_prob``
-  and (if accepted) apply a constant world-+Z force on the selected body for
-  ``duration_steps`` env steps (or until the env recovers / resets).
+  Adapted from AMP_mjlab ``apply_recovery_assist_force``, but default trigger
+  is step 1 (immediately when failure is announced / delay window opens),
+  not the window midpoint — mid-window assist often leaves too little time
+  to stand. When a recovery env's counter first hits
+  ``trigger_recovery_steps``, sample ``apply_prob`` and (if accepted) apply
+  a constant world-+Z force on the selected body for ``duration_steps`` env
+  steps (or until the env recovers / resets).
 
   The applied force is ``state["force"]`` (AMP_mjlab's ``current_force``),
   decayed by the ``recovery_assist_force`` curriculum term; before the
