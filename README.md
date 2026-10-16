@@ -59,116 +59,6 @@ uv run train Mjlab-Velocity-Flat-Unitree-G1 \
 uv run play Mjlab-Velocity-Flat-Unitree-G1 --wandb-run-path your-org/mjlab/run-id
 ```
 
-### 2. 动作模仿
-
-训练人形机器人模仿参考动作。mjlab 使用 WandB 管理动作数据集，
-准备工作见[动作预处理文档](https://github.com/HybridRobotics/whole_body_tracking/blob/main/README.md#motion-preprocessing--registry-setup)。
-
-```bash
-uv run train Mjlab-Tracking-Flat-Unitree-G1 --registry-name your-org/motions/motion-name --env.scene.num-envs 4096
-uv run play Mjlab-Tracking-Flat-Unitree-G1 --wandb-run-path your-org/mjlab/run-id
-```
-
-### 3. Go2 动作跟踪（本地 npz）
-
-使用 `motions/` 下的本地动作文件训练 / 播放 Unitree Go2 跟踪任务。
-训练默认无头模式（`MUJOCO_GL=egl`），日志与 TensorBoard 事件写入
-`logs/rsl_rl/go2_tracking/`。
-
-#### 演示视频
-
-学习到的 Go2 技能（文件位于 [`videos/`](videos/)）。
-每行两个视频（50/50），避免 GitHub 播放器把中间列拉宽。
-
-<table width="100%">
-  <tr>
-    <td width="50%" align="center" valign="top">
-      <video src="https://github.com/user-attachments/assets/800a0da9-42c4-4cb2-a20b-dcb2e0fa96f7" controls width="240" height="427"></video>
-      <br />后空翻
-    </td>
-    <td width="50%" align="center" valign="top">
-      <video src="https://github.com/user-attachments/assets/39d54ec3-1454-4242-8abe-e9e5388f7281" controls width="240" height="427"></video>
-      <br />前空翻
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" align="center" valign="top">
-      <video src="https://github.com/user-attachments/assets/a7419df5-61e3-4dad-9d27-cb5a811a656c" controls width="240" height="427"></video>
-      <br />左侧空翻
-    </td>
-    <td width="50%" align="center" valign="top">
-      <video src="https://github.com/user-attachments/assets/8e613766-5154-401c-acf8-30e16f4333f2" controls width="240" height="427"></video>
-      <br />右侧空翻
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" align="center" valign="top">
-      <video src="https://github.com/user-attachments/assets/e52d7050-4e29-4154-b262-4362de74b10c" controls width="240" height="427"></video>
-      <br />原地起跳
-    </td>
-    <td width="50%" align="center" valign="top">
-      <video src="https://github.com/user-attachments/assets/6671fdd5-c6d3-4ec1-9518-9cd5b92cce30" controls width="240" height="427"></video>
-      <br />向前跳跃
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" align="center" valign="top">
-      <video src="https://github.com/user-attachments/assets/a85a9024-c823-4b3a-ad54-ea8cc9d7476c" controls width="240" height="427"></video>
-      <br />向后跳跃
-    </td>
-    <td width="50%"></td>
-  </tr>
-</table>
-
-**依次训练三个跳远动作**（各 4096 envs、10000 轮迭代）：
-
-```bash
-cd /path/to/mjlab-dev-go2-mimic
-
-for motion in \
-  go2_longjump_0p0 \
-  go2_longjump_0p7 \
-  go2_longjump_m0p5
-do
-  echo "========== Training $motion =========="
-  uv run python -m mjlab.scripts.train \
-    Mjlab-Tracking-Flat-Unitree-Go2-No-State-Estimation \
-    --env.commands.motion.motion-file "$PWD/motions/${motion}.npz" \
-    --env.scene.num-envs 4096 \
-    --agent.max-iterations 10000 \
-    --agent.run-name "$motion"
-done
-```
-
-若在 actor 观测中保留状态估计，请改用任务 ID
-`Mjlab-Tracking-Flat-Unitree-Go2`。
-
-**播放**（自动选取按名称排序的最新 ``model_*.pt``）。
-``--keep-randomization True`` 保留训练期随机化并默认 **50 个环境**：
-
-```bash
-uv run python -m mjlab.scripts.play \
-  Mjlab-Tracking-Flat-Unitree-Go2-No-State-Estimation \
-  --motion-file $PWD/motions/go2_longjump_m0p5.npz \
-  --keep-randomization True
-```
-
-需要时可覆盖环境数量：``--num-envs 16``，或使用辅助命令：
-
-```bash
-uv run play-go2-rand --motion-file $PWD/motions/go2_longjump_m0p5.npz
-```
-
-显式指定 checkpoint：
-
-```bash
-
- python -m mjlab.scripts.play \
-  Mjlab-Tracking-Flat-Unitree-Go2-No-State-Estimation \
-  --motion-file $PWD/motions/go2_longjump_m0p5.npz \
-  --checkpoint-file logs/rsl_rl/go2_tracking/<run>/model_10000.pt \
-  --keep-randomization True
-```
 
 ## G1 动作跟踪
 **训练**（4096 envs、10000 轮迭代；可循环任意动作）：环境变量必须修改
@@ -206,12 +96,12 @@ checkpoint；`--agent.max-iterations` 是**新的总目标轮数**（从已恢�
 ```bash
 python -m mjlab.scripts.train \
   Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
-  --env.commands.motion.motion-file "$PWD/motions/omnixtreme/g1_motion_long_01.npz" \
+  --env.commands.motion.motion-file "$PWD/motions/omnixtreme/g1_motion_long_13.npz" \
   --env.scene.num-envs 4096 \
-  --agent.max-iterations 20000 \
-  --agent.run-name "g1_motion_long_01" \
+  --agent.max-iterations 10000 \
+  --agent.run-name "g1_motion_long_13" \
   --agent.resume True \
-  --agent.load-run ".*g1_motion_long_01"
+  --agent.load-run ".*g1_motion_long_13"
 ```
 
 指定具体 checkpoint（如从 `model_7000.pt` 续训）：
@@ -315,7 +205,7 @@ Fall-Recovery 任务日志独立保存到 **`logs/rsl_rl/g1_fall_recovery/`**
 conda activate env_isaaclab
 cd /home/zju/Downloads/mjlab-dev-go2-mimic
 PYTHONPATH=src python src/mjlab/scripts/train.py \
-  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation \
   --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
   --env.scene.num-envs 4096 \
   --agent.max-iterations 10000 \
@@ -327,7 +217,7 @@ PYTHONPATH=src python src/mjlab/scripts/train.py \
 
 ```bash
 python -m mjlab.scripts.train \
-  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation \
   --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
   --env.scene.num-envs 4096 \
   --agent.max-iterations 30000 \
@@ -434,29 +324,8 @@ python -m mjlab.scripts.render_g1_motions \
   --pattern 'chunwan/88_05*.npz' \
   --output-dir videos/g1_motions
 
-# 可选项：--every-nth 2（帧率减半）、--follow False（固定 "track" 相机）、
-# --skip-existing False（重新渲染）
 ```
 
-### 4. 用 Dummy 智能体做健全性检查
-
-训练前用内置智能体检查你的 MDP：
-
-```bash
-uv run play Mjlab-Your-Task-Id --agent zero  # 发送零动作
-uv run play Mjlab-Your-Task-Id --agent random  # 发送均匀随机动作
-```
-
-运行动作跟踪任务时，请在命令中追加 `--registry-name your-org/motions/motion-name`。
-
-## 开发
-
-```bash
-make test          # 运行全部测试
-make test-fast     # 跳过慢速测试
-make format        # 格式化与 lint
-make docs          # 本地构建文档
-```
 ```bash
 conda activate env_isaaclab
 cd /home/zju/Downloads/mjlab-dev-go2-mimic
@@ -466,7 +335,6 @@ for motion in \
     g1_kick_combo \
     g1_spinkick \
     g1_cartwheel2 
-
 do
   echo "========== Training $motion =========="
   python -m mjlab.scripts.train \
@@ -486,12 +354,11 @@ done
 - [x] 负功率限制(omnixtreme)
 - [x] 添加后空翻等极限动作
 - [x] 手部接触的力进行限制
+- [x] 手部抬到上面去
+- [x] 部分低动态动作使用空翻高动态训练跟踪不好,直接二阶段resume就可以了，收紧终止条件
 - [] 查尔斯顿舞的长序列动作(3min) 倒地恢复的力课程
-- [] 手部抬到上面去
-- [] 逐渐收紧的终止条件
-- [] 统一的奖励系数
-- [] 更高的抗扰性，地形，
-- [] 更强的跟踪能力(适应模块)
+- [] 更高的抗扰性，地形，更强的跟踪能力(适应模块)
+- [] EX-RGMT
 
 ## G1 执行器建模：梯形力矩-速度包络与非线性摩擦
 

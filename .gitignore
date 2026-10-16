@@ -1,5 +1,7 @@
 wandb/
 # logs/
+# Per-run dumped env/agent yaml under each training log dir.
+logs/**/params/
 onnx/
 # videos/
 __pycache__/
