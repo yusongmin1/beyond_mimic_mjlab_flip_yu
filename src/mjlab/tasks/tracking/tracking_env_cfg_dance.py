@@ -34,6 +34,16 @@ VELOCITY_RANGE = {
   "yaw": (-0.78, 0.78),
 }
 
+# KungFuAthleteBot Stage-III push / RSI velocity (stronger disturbance).
+VELOCITY_RANGE_ADD = {
+  "x": (-0.75, 0.75),
+  "y": (-0.75, 0.75),
+  "z": (-0.3, 0.3),
+  "roll": (-0.78, 0.78),
+  "pitch": (-0.78, 0.78),
+  "yaw": (-1.17, 1.17),
+}
+
 
 def make_dance_env_cfg() -> ManagerBasedRlEnvCfg:
   """Create base dance tracking task configuration."""

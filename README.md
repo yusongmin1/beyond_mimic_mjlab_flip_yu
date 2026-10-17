@@ -70,10 +70,8 @@ export PYTHONPATH=src
 ```
 ```bash
 for motion in \
-  omnixtreme/g1_motion_long_01\
-  omnixtreme/g1_motion_long_08 \
-  omnixtreme/g1_motion_long_10 \
-  omnixtreme/g1_motion_long_13
+  omnixtreme/g1_motion_long_06\
+  omnixtreme/g1_motion_long_19 
 do
   echo "========== Training $motion =========="
   python -m mjlab.scripts.train \
@@ -147,30 +145,148 @@ vs 地面的接触传感器，play 中实时打印接触 link 与法向力大小
 可选参数：`--hand-contact-bodies <regex>`（默认
 `(left|right)_wrist_(pitch|roll|yaw)_link`）、`--hand-contact-min-force <N>`。
 
-### G1 Dance Fall-Recovery 任务（倒地恢复实验入口）
+### G1 Dance / Dance Fall-Recovery 任务
 
-**倒地恢复（fall-and-get-up）训练任务**：基于
-`tracking_env_cfg_dance.py` 的宽松锚点奖励配置（root_pos 1.0 / root_ori 0.5），
-执行器已启用梯形力矩-速度包络（见下节）。当前动作数据：
+基于 `tracking_env_cfg_dance.py` 的宽松锚点奖励配置（root_pos 1.0 /
+root_ori 0.5），执行器已启用梯形力矩-速度包络（见下节）。当前动作数据：
 `motions/dance1_subject2.npz`。
 
-原来的普通 Dance 任务（`Mjlab-Tracking-Flat-Unitree-G1-Dance` 与
-No-State-Estimation 变体）**已删除**，请改用 Fall-Recovery 任务。
-带状态估计版本：`Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery`；
-无状态估计版本：`Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation`。
+| 任务 ID | 说明 | 日志目录 |
+| :--- | :--- | :--- |
+| `Mjlab-Tracking-Flat-Unitree-G1-Dance` | 纯舞蹈跟踪 | `logs/rsl_rl/g1_dance/` |
+| `Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation` | 纯舞蹈，无状态估计（Stage-I） | 同上 |
+| `Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation-Stage-II` | Stage-II：更严终止 + 更大推力 | 同上 |
+| `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery` | 舞蹈 + 倒地恢复（Stage-I，z 0.5） | `logs/rsl_rl/g1_fall_recovery/` |
+| `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation` | 同上，无状态估计（Stage-I） | 同上 |
+| `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II` | 倒地恢复 Stage-II（z 0.25） | 同上 |
 
-#### 环境分组（50% / 25% / 25%）
+纯 Dance 训练示例：
+
+```bash
+PYTHONPATH=src python -m mjlab.scripts.train \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation \
+  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
+  --env.scene.num-envs 4096 \
+  --agent.max-iterations 10000 \
+  --agent.run-name "dance1_subject2"
+```
+
+**Stage-II resume**（参考 KungFuAthleteBot：收紧跟踪终止 + `VELOCITY_RANGE_ADD`
+更大推扰与初始速度噪声；RSI 初始位姿/关节噪声与一阶段一致。从 Stage-I
+checkpoint 续训。`--agent.load-run` 在
+`logs/rsl_rl/g1_dance/` 下按正则取最新匹配；用 `.*_dance1_subject2$`
+避免误匹配 `..._dance1_subject2_stage2`）：
+
+```bash
+conda activate env_isaaclab
+cd /home/zju/Downloads/mjlab-dev-go2-mimic
+export PYTHONPATH=src
+
+python -m mjlab.scripts.train \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation-Stage-II \
+  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
+  --env.scene.num-envs 4096 \
+  --agent.max-iterations 20000 \
+  --agent.run-name "dance1_subject2_stage2" \
+  --agent.resume True \
+  --agent.load-run ".*_dance1_subject2$"
+```
+
+指定 Stage-I 的某个 checkpoint（例如 `model_10000.pt`）：
+
+```bash
+python -m mjlab.scripts.train \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation-Stage-II \
+  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
+  --env.scene.num-envs 4096 \
+  --agent.max-iterations 20000 \
+  --agent.run-name "dance1_subject2_stage2" \
+  --agent.resume True \
+  --agent.load-run ".*_dance1_subject2$" \
+  --agent.load-checkpoint "model_10000.pt"
+```
+
+若 Stage-I 仍在旧目录 `logs/rsl_rl/g1_tracking/`，先链到 `g1_dance/` 再 resume：
+
+```bash
+mkdir -p logs/rsl_rl/g1_dance
+ln -sfn "$(realpath logs/rsl_rl/g1_tracking/<stage1_run>)" \
+  "logs/rsl_rl/g1_dance/$(basename logs/rsl_rl/g1_tracking/<stage1_run>)"
+# 然后再跑上面的 Stage-II resume 命令
+```
+
+**播放**（Stage-II 训练完后，自动选 `g1_dance/` 下最新 checkpoint；
+显式指定时用 `--checkpoint-file`）：
+
+```bash
+python -m mjlab.scripts.play \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation-Stage-II \
+  --motion-file $PWD/motions/dance1_subject2.npz \
+  --keep-randomization True
+```
+
+指定 Stage-II 某个 checkpoint：
+
+```bash
+python -m mjlab.scripts.play \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation-Stage-II \
+  --motion-file $PWD/motions/dance1_subject2.npz \
+  --keep-randomization True \
+  --checkpoint-file logs/rsl_rl/g1_dance/<stage2_run>/model_20000.pt
+```
+
+去掉 `--keep-randomization` 则为干净环境回放（无推扰、无 RSI 噪声、
+无终止）。
+
+#### Fall-Recovery 环境分组（60% / 20% / 20%，每次 reset 随机重抽）
+
+#### 环境分组（60% / 20% / 20%，动态随机抽取）
 
 | 组 | 比例 | 行为 |
 | :--- | :--- | :--- |
-| 正常跟踪 | 50% | 标准 BeyondMimic 式跟踪，摔倒即终止 |
-| 倒地窗口组 | 25% | 正常起步，摔倒后获得起身窗口（AMP_mjlab 式延迟终止 + torso 向上助力） |
-| 躺倒初始化组 | 25% | reset 时直接从预采集的多样躺倒状态池初始化（KungFuAthleteBot 式 `.pth` 池） |
+| 正常跟踪 | 60% | 标准 BeyondMimic 式跟踪，摔倒即终止 |
+| 倒地窗口组 | 20% | 正常起步，摔倒后获得起身窗口（AMP_mjlab 式延迟终止 + torso 向上助力） |
+| 躺倒初始化组 | 20% | reset 时直接从预采集的多样躺倒状态池初始化（KungFuAthleteBot 式 `.pth` 池） |
+
+分组**不再固定 env id**：每次 episode reset 时按比例随机重抽每个 env 的
+组别（`MotionCommand._roll_recovery_groups`），终止管理器每步读取命令侧
+`is_recovery_env` 掩码（`RecoveryTerminationManager`），因此延迟终止窗口
+与助力课程始终与当次抽取结果同步。
+
+#### 两阶段（Stage-I / Stage-II）
+
+两阶段共享环境分组、容忍 + 延迟窗口（2 s + 2 s）、助力课程与爬起奖励；
+**唯一差别是 TolerantTermination 的两个 z 阈值**（KungFu Stage-I 风格课程）：
+
+| 终止子条件 | Stage-I | Stage-II |
+| :--- | :--- | :--- |
+| `anchor_pos_z`（锚点高度偏差） | **> 0.5 m** | > 0.25 m |
+| `ee_body_pos_z`（腕/踝高度偏差） | **> 0.5 m** | > 0.25 m |
+| `anchor_ori`（姿态） | > 0.8 | > 0.8（不变） |
+
+| 任务 ID | 阶段 |
+| :--- | :--- |
+| `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery(-No-State-Estimation)` | Stage-I（z 0.5） |
+| `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II` | Stage-II（z 0.25） |
+
+Stage-II 从 Stage-I checkpoint resume（`--agent.load-run` 匹配
+`logs/rsl_rl/g1_fall_recovery/` 下的 Stage-I run）：
+
+```bash
+python -m mjlab.scripts.train \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II \
+  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
+  --env.scene.num-envs 4096 \
+  --agent.max-iterations 30000 \
+  --agent.run-name "dance1_subject2_fr_stage2" \
+  --agent.resume True \
+  --agent.load-run ".*_dance1_subject2$"
+```
 
 关键参数（`config/g1/env_cfgs.py` 中 `enable_fall_recovery=True` 分支）：
 
-- `recovery_env_ratio=0.5`：恢复组占比（组内再对半分窗口组 / 躺倒初始化组）；
-- `fallen_init_ratio=0.5`：恢复组中躺倒初始化的比例；
+- `recovery_env_ratio=0.4`：恢复组总占比 **40%**（每次 reset 随机重抽，非固定 env）；
+- `fallen_init_ratio=0.5`：恢复组中躺倒初始化的比例（40% × 50% = 20% 窗口组 / 20% 躺倒组）；
 - `bad_tracking_time_threshold_s=2.0` + `max_recovery_steps=100`（@50Hz）：
   容忍终止 2 s + 延迟窗口 2 s，**总起身窗口 4 s**；
 - `recovery_assist_initial_force=250 N`：torso 向上助力，在 Layer1 宣布失败后
@@ -247,9 +363,9 @@ python -m mjlab.scripts.play \
 下表将本仓库与四个来源的域随机化并排对比：
 
 - **本仓库**：`src/mjlab/tasks/tracking/tracking_env_cfg.py`（Go2 与 G1 数值一致，差异以括号注明）；
-- **mimic_mjlab-main**：`/home/zju/lab/mimic/mimic_mjlab-main/src/tasks/tracking/tracking_env_cfg.py`；
+- **mimic_mjlab-main**：`mimic_mjlab-main/src/tasks/tracking/tracking_env_cfg.py`（外部仓库）；
 - **KungFuAthleteBot-main**：`unitree_rl_mjlab/src/tasks/tracking/tracking_env_cfg.py`（跟踪任务；另附 `holosoma_min` 全身跟踪预设）；
-- **Go2_Cts**：`/home/zju/My_unitree_go2_gym/legged_gym/envs/Go2_Cts/Go2_Cts_Config.py`（legged_gym 速度指令任务，CTS 特权学习）；
+- **Go2_Cts**：`legged_gym/envs/Go2_Cts/Go2_Cts_Config.py`（legged_gym 速度指令任务，CTS 特权学习）；
 - **OmniXtreme 二阶段**：arXiv:2602.23843 Table I "Aggressive" 列（残差后训练阶段，常规项较一阶段最多放大 50%）。
 
 | 随机化项 | 本仓库（Go2/G1） | mimic_mjlab-main | KungFuAthleteBot | Go2_Cts（legged_gym） | OmniXtreme 二阶段（激进） |

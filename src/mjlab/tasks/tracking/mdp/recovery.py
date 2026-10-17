@@ -8,9 +8,10 @@ Ported and adapted from:
   fallen-state initialization from a pre-collected ``.pth`` pool
   (``robot_init_states_*.pth``, diverse pelvis orientations near the ground).
 
-Env grouping (per episode reset):
-- 50% normal tracking envs (reference-state init, standard terminations).
-- 50% recovery envs, of which:
+Env grouping (re-rolled randomly on every episode reset):
+- 60% normal tracking envs (reference-state init, standard terminations).
+- 40% recovery envs (randomly re-sampled each reset, not fixed env ids),
+  of which:
   - half are "fall-window" envs: they start from the motion reference but get
     a delayed-termination recovery window after tracking failure (fall), so
     the policy must get up;
@@ -21,6 +22,7 @@ Env grouping (per episode reset):
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -44,29 +46,49 @@ class RecoveryTerminationManager(TerminationManager):
   the whole window. If the env recovers on its own (termination condition
   clears), the counter resets.
 
-  Adapted from AMP_mjlab ``DelayedTerminationManager``.
+  The recovery set is NOT static: the mask is re-read from the motion
+  command every step (``recovery_mask_fn``), which re-rolls the normal /
+  fall-window / fallen-init split on every reset (40% recovery, 20/20 split
+  by default). Adapted from AMP_mjlab ``DelayedTerminationManager``.
   """
 
   def __init__(
     self,
     base: TerminationManager,
-    recovery_env_mask: torch.Tensor,
+    recovery_mask_fn: Callable[[], torch.Tensor],
     max_recovery_steps: int,
   ) -> None:
     # Steal all internal state from the base manager (avoid re-init).
     self.__dict__.update(base.__dict__)
-    self._recovery_env_mask = recovery_env_mask  # (num_envs,) bool
-    self._recovery_counters = torch.zeros_like(recovery_env_mask, dtype=torch.long)
+    self._recovery_mask_fn = recovery_mask_fn  # () -> (num_envs,) bool
+    self._recovery_env_mask = torch.zeros(
+      base.num_envs if hasattr(base, "num_envs") else 0,
+      dtype=torch.bool,
+    )
+    self._recovery_counters = None  # Lazily created on first compute.
     self._max_recovery_steps = max_recovery_steps
 
   def compute(self) -> torch.Tensor:
+    # Refresh the recovery set from the command (re-rolled every reset).
+    mask = self._recovery_mask_fn()
+    device = mask.device
+    if (
+      self._recovery_counters is None
+      or self._recovery_counters.device != device
+      or self._recovery_counters.shape != mask.shape
+    ):
+      self._recovery_counters = torch.zeros_like(mask, dtype=torch.long)
+    self._recovery_env_mask = mask
+    # Envs that left the recovery group: drop their stale counters.
+    self._recovery_counters[~mask] = 0
+
     dones = super().compute()  # fills _truncated_buf, _terminated_buf
 
     if self._max_recovery_steps <= 0:
       return dones
 
     # For recovery envs that just got a done signal, increment counter.
-    rec_and_done = self._recovery_env_mask & dones
+    rec_and_done = mask & dones
     self._recovery_counters[rec_and_done] += 1
 
     # Recovery envs whose counter hasn't reached threshold: suppress reset.
@@ -78,7 +100,7 @@ class RecoveryTerminationManager(TerminationManager):
     self._recovery_counters[ready] = 0
 
     # Clear counters for recovery envs that are NOT done (recovered on their own).
-    self._recovery_counters[self._recovery_env_mask & ~dones] = 0
+    self._recovery_counters[mask & ~dones] = 0
 
     return self._truncated_buf | self._terminated_buf
 
@@ -86,35 +108,43 @@ class RecoveryTerminationManager(TerminationManager):
 def install_recovery_termination(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor | None,
-  recovery_env_ratio: float = 0.5,
+  command_name: str = "motion",
+  recovery_env_ratio: float = 0.4,
   max_recovery_steps: int = 100,
 ) -> None:
   """Startup event: wrap the termination manager with a recovery window.
 
-  The mask is static for the whole training run (as in AMP_mjlab): the same
-  envs keep the recovery window. The normal/recovery identity per env only
-  matters inside a single episode, and the reset sampler re-rolls the
-  fall-type split (fall-window vs fallen-init) on every reset.
+  The recovery set is dynamic: the manager re-reads the command-side
+  ``is_recovery_env`` mask every step, and the command re-rolls the split
+  (normal / fall-window / fallen-init) on every reset. With
+  ``recovery_env_ratio=0.4`` and ``fallen_init_ratio=0.5`` this yields
+  60% normal / 20% fall-window / 20% fallen-init per reset, with the
+  membership re-sampled randomly each episode (no fixed env ids).
   """
   del env_ids  # Unused (startup).
   if not 0.0 <= recovery_env_ratio <= 1.0:
     raise ValueError(f"recovery_env_ratio must be in [0, 1], got {recovery_env_ratio}.")
-  num_rec = int(env.num_envs * recovery_env_ratio)
-  if num_rec <= 0 or max_recovery_steps <= 0:
+  if recovery_env_ratio <= 0.0 or max_recovery_steps <= 0:
     return
   if isinstance(env.termination_manager, RecoveryTerminationManager):
     return
-  mask = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-  indices = torch.randperm(env.num_envs, device=env.device)[:num_rec]
-  mask[indices] = True
+
+  def mask_fn() -> torch.Tensor:
+    command = env.command_manager.get_term(command_name)
+    mask = getattr(command, "is_recovery_env", None)
+    if mask is None:
+      return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    return mask.bool()
+
   env.termination_manager = RecoveryTerminationManager(
     base=env.termination_manager,
-    recovery_env_mask=mask,
+    recovery_mask_fn=mask_fn,
     max_recovery_steps=max_recovery_steps,
   )
   print(
-    f"[recovery] Installed RecoveryTerminationManager: {num_rec}/{env.num_envs} envs "
-    f"with a {max_recovery_steps}-step recovery window."
+    f"[recovery] Installed RecoveryTerminationManager: dynamic mask from "
+    f"'{command_name}' (~{int(recovery_env_ratio * 100)}% recovery envs, "
+    f"re-rolled every reset) with a {max_recovery_steps}-step recovery window."
   )
 
 
@@ -255,6 +285,8 @@ def apply_recovery_assist_force(
 
   counters = tm._recovery_counters
   recovery_mask = tm._recovery_env_mask
+  if counters is None:
+    return
 
   # Clear when recovery ends (recovered or window expired and reset).
   clear = active & (counters == 0)

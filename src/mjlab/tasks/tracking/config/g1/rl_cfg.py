@@ -47,6 +47,18 @@ def unitree_g1_tracking_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
   )
 
 
+def unitree_g1_dance_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+  """Runner configuration for the G1 dance tracking tasks.
+
+  Identical to the tracking runner, but logs to
+  ``logs/rsl_rl/g1_dance/`` instead of ``g1_tracking``.
+  """
+  return dataclasses.replace(
+    unitree_g1_tracking_ppo_runner_cfg(),
+    experiment_name="g1_dance",
+  )
+
+
 def unitree_g1_fall_recovery_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
   """Runner configuration for the G1 fall-recovery tasks.
 

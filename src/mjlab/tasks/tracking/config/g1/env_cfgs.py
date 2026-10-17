@@ -21,7 +21,10 @@ from mjlab.sensor import ContactMatch, ContactSensorCfg, JointTorqueSensorCfg
 from mjlab.tasks.tracking import mdp
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
-from mjlab.tasks.tracking.tracking_env_cfg_dance import make_dance_env_cfg
+from mjlab.tasks.tracking.tracking_env_cfg_dance import (
+  VELOCITY_RANGE_ADD,
+  make_dance_env_cfg,
+)
 
 TauMode = Literal["off", "reward", "critic", "actor_critic"]
 TauFilter = Literal["mean", "last"]
@@ -68,11 +71,12 @@ def unitree_g1_flat_dance_env_cfg(
   play: bool = False,
   enable_actuator_delay: bool = True,
   enable_fall_recovery: bool = False,
-  recovery_env_ratio: float = 0.5,
+  recovery_env_ratio: float = 0.4,
   fallen_init_ratio: float = 0.5,
   max_recovery_steps: int = 100,
   bad_tracking_time_threshold_s: float = 2.0,
   recovery_assist_initial_force: float = 250.0,
+  fall_recovery_stage: int = 1,
 ) -> ManagerBasedRlEnvCfg:
   """Create Unitree G1 dance tracking configuration.
 
@@ -85,7 +89,10 @@ def unitree_g1_flat_dance_env_cfg(
       (delayed termination + tolerant tracking termination); within that
       group fallen_init_ratio start lying on the ground from a
       pre-collected pool (KungFuAthleteBot robot_init_states format).
-    recovery_env_ratio: Fraction of envs in the recovery group (0.5 => 50%).
+      The split is re-rolled randomly on every reset (dynamic, not fixed
+      env ids).
+    recovery_env_ratio: Fraction of envs in the recovery group (0.4 => 40%,
+      re-sampled each reset).
     fallen_init_ratio: Fraction of the recovery group that is initialized
       fallen (0.5 => half of the recovery envs; the rest fall during the
       episode and get the window).
@@ -97,6 +104,9 @@ def unitree_g1_flat_dance_env_cfg(
       (default 2s + 2s = 4s).
     recovery_assist_initial_force: Initial upward assist force (N) on the
       torso while a recovery env is down; decays to 0 over training.
+    fall_recovery_stage: Stage-I uses the loose z thresholds
+      (anchor/ee z 0.5 m, KungFu Stage-I style); Stage-II uses the strict
+      ones (0.25 m). Both stages share the tolerant + delayed windows.
   """
   cfg = make_dance_env_cfg()
   return _apply_g1_overrides(
@@ -112,7 +122,65 @@ def unitree_g1_flat_dance_env_cfg(
     max_recovery_steps=max_recovery_steps,
     bad_tracking_time_threshold_s=bad_tracking_time_threshold_s,
     recovery_assist_initial_force=recovery_assist_initial_force,
+    fall_recovery_stage=fall_recovery_stage,
   )
+
+
+def unitree_g1_flat_dance_env_cfg_stage_ii(
+  has_state_estimation: bool = True,
+  tau_mode: TauMode = "off",
+  tau_filter: TauFilter = "mean",
+  play: bool = False,
+  enable_actuator_delay: bool = True,
+) -> ManagerBasedRlEnvCfg:
+  """Dance Stage-II (KungFuAthleteBot-style): tighter tracking + stronger push.
+
+  Relative to Stage-I (plain ``unitree_g1_flat_dance_env_cfg``):
+  - terminations: full ``anchor_pos`` (1.0 m) instead of z-only; ``anchor_ori``
+    0.8 → 0.6; drop ``ee_body_pos`` z-only (same swaps as KungFu Stage-II);
+  - push / RSI velocity: ``VELOCITY_RANGE_ADD`` (same as KungFu Stage-III push);
+  - RSI pose noise unchanged from Stage-I (±0.05 m xy / ±0.01 m z).
+
+  Intended to resume from a Stage-I Dance checkpoint.
+  """
+  cfg = unitree_g1_flat_dance_env_cfg(
+    has_state_estimation=has_state_estimation,
+    tau_mode=tau_mode,
+    tau_filter=tau_filter,
+    play=play,
+    enable_actuator_delay=enable_actuator_delay,
+    enable_fall_recovery=False,
+  )
+  return _apply_dance_stage_ii_overrides(cfg, play=play)
+
+
+def _apply_dance_stage_ii_overrides(
+  cfg: ManagerBasedRlEnvCfg, *, play: bool
+) -> ManagerBasedRlEnvCfg:
+  """Apply KungFu-style Stage-II tracking limits + stronger push (config only)."""
+  # --- Stricter tracking terminations (KungFu Stage-II) ---
+  cfg.terminations["anchor_pos"] = TerminationTermCfg(
+    func=mdp.bad_anchor_pos,
+    params={"command_name": "motion", "threshold": 1.0},
+  )
+  cfg.terminations["anchor_ori"].params["threshold"] = 0.6
+  cfg.terminations.pop("ee_body_pos", None)
+
+  # Play mode already clears RSI / push in ``_apply_g1_overrides``; keep that.
+  if play:
+    return cfg
+
+  # --- Stronger push + RSI velocity (KungFu Stage-III push magnitude) ---
+  # RSI pose noise stays at Stage-I values (dance base cfg); only the
+  # velocity noise is enlarged.
+  motion_cmd = cfg.commands["motion"]
+  assert isinstance(motion_cmd, MotionCommandCfg)
+  motion_cmd.velocity_range = VELOCITY_RANGE_ADD
+
+  if "push_robot" in cfg.events:
+    cfg.events["push_robot"].params["velocity_range"] = VELOCITY_RANGE_ADD
+
+  return cfg
 
 
 def _apply_g1_overrides(
@@ -128,6 +196,7 @@ def _apply_g1_overrides(
   max_recovery_steps: int = 100,
   bad_tracking_time_threshold_s: float = 2.0,
   recovery_assist_initial_force: float = 250.0,
+  fall_recovery_stage: int = 1,
 ) -> ManagerBasedRlEnvCfg:
   """Apply Unitree G1 robot-specific overrides to a tracking base config."""
   if tau_mode not in {"off", "reward", "critic", "actor_critic"}:
@@ -299,6 +368,9 @@ def _apply_g1_overrides(
     # 2) Termination: replace immediate tracking terminations with a
     #    tolerant version — normal envs terminate instantly; recovery envs
     #    get a continuous-bad-tracking window before the reset is released.
+    #    Stage-I uses loose z thresholds (KungFu Stage-I style, 0.5 m);
+    #    Stage-II tightens them to 0.25 m.
+    z_threshold = 0.5 if fall_recovery_stage == 1 else 0.25
     cfg.terminations["tracking_failure"] = TerminationTermCfg(
       func=mdp.TolerantTermination(
         bad_tracking_time_threshold_s=bad_tracking_time_threshold_s,
@@ -306,7 +378,7 @@ def _apply_g1_overrides(
         terms=[
           ("anchor_pos_z", mdp.bad_anchor_pos_z_only, {
             "command_name": "motion",
-            "threshold": 0.25,
+            "threshold": z_threshold,
           }),
           ("anchor_ori", mdp.bad_anchor_ori, {
             "asset_cfg": SceneEntityCfg("robot"),
@@ -315,7 +387,7 @@ def _apply_g1_overrides(
           }),
           ("ee_body_pos_z", mdp.bad_motion_body_pos_z_only, {
             "command_name": "motion",
-            "threshold": 0.25,
+            "threshold": z_threshold,
             "body_names": (
               "left_ankle_roll_link",
               "right_ankle_roll_link",
@@ -332,10 +404,13 @@ def _apply_g1_overrides(
     cfg.terminations.pop("ee_body_pos", None)
 
     # 3) Startup: wrap the termination manager with the recovery window.
+    #    The recovery set is dynamic (re-rolled on every reset via the
+    #    command-side mask): 60% normal / 20% fall-window / 20% fallen-init.
     cfg.events["install_recovery_termination"] = EventTermCfg(
       func=mdp.install_recovery_termination,
       mode="startup",
       params={
+        "command_name": "motion",
         "recovery_env_ratio": recovery_env_ratio,
         "max_recovery_steps": max_recovery_steps,
       },

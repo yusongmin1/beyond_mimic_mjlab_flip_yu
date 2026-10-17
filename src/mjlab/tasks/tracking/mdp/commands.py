@@ -434,12 +434,12 @@ class MotionCommand(CommandTerm):
   def _roll_recovery_groups(self, env_ids: torch.Tensor) -> None:
     """Split envs into normal / fall-window-recovery / fallen-init groups.
 
-    Per user spec: 50% of envs are normal; of the remaining 50% recovery
-    envs, half fall during the episode and get a get-up window (fall-window),
-    half start lying on the ground (fallen-init). Recovery envs are the
-    union of fall-window + fallen-init (this mask must match the
-    RecoveryTerminationManager static mask; we keep the union fixed and only
-    re-roll which recovery envs are fallen-init on each reset).
+    Re-rolled randomly on every episode reset (no fixed env ids): with
+    ``recovery_env_ratio=0.4`` and ``fallen_init_ratio=0.5`` this yields
+    60% normal tracking, 20% fall-window recovery, 20% fallen-init per
+    reset, with membership re-sampled each episode. The termination
+    manager reads ``is_recovery_env`` every step so its recovery set
+    follows these re-rolls exactly.
     """
     if self.cfg.recovery_env_ratio <= 0.0:
       self.is_recovery_env[env_ids] = False
@@ -448,7 +448,7 @@ class MotionCommand(CommandTerm):
 
     n = env_ids.numel()
     rec = torch.rand(n, device=self.device) < self.cfg.recovery_env_ratio
-    # Among recovery envs, fallen-init share (default: 50% of recovery).
+    # Among recovery envs, fallen-init share (default: half of the 40%).
     fallen = rec & (
       torch.rand(n, device=self.device) < self.cfg.fallen_init_ratio
     )
