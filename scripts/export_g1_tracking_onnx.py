@@ -145,8 +145,8 @@ def find_motion(run_dir: str, run_name: str) -> str:
                     return cand
     # 2) infer from run name
     for pat, sub in [
-        (r"((?:88|90)_\d+_stageii_unitree_g1(?:_fixed)?)", "chunwan"),
-        (r"(g1_motion_long_\d+)", "omnixtreme"),
+        (r"((?:88|90)_\d+_stageii_unitree_g1(?:_fixed)?(?:_with_prep)?)", "chunwan"),
+        (r"(g1_motion_long_\d+(?:_with_prep)?)", "omnixtreme"),
         (r"(g1_(?:kick_combo|spinkick|cartwheel2?))", "mimickit"),
         (r"(dance1_subject2)", ""),
     ]:
