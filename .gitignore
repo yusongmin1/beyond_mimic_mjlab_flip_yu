@@ -4,6 +4,7 @@ wandb/
 logs/**/params/
 onnx/
 # videos/
+videos/g1_policy/
 __pycache__/
 MUJOCO_LOG.TXT
 debug.py
