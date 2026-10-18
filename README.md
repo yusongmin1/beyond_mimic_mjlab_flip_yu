@@ -94,12 +94,12 @@ checkpoint；`--agent.max-iterations` 是**新的总目标轮数**（从已恢�
 ```bash
 python -m mjlab.scripts.train \
   Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
-  --env.commands.motion.motion-file "$PWD/motions/omnixtreme/g1_motion_long_13.npz" \
+  --env.commands.motion.motion-file "$PWD/motions/chunwan/88_05_stageii_unitree_g1.npz" \
   --env.scene.num-envs 4096 \
-  --agent.max-iterations 10000 \
-  --agent.run-name "g1_motion_long_13" \
+  --agent.max-iterations 50000 \
+  --agent.run-name "88_05_stageii_unitree_g1" \
   --agent.resume True \
-  --agent.load-run ".*g1_motion_long_13"
+  --agent.load-run ".*88_05_stageii_unitree_g1"
 ```
 
 指定具体 checkpoint（如从 `model_7000.pt` 续训）：
@@ -119,7 +119,7 @@ python -m mjlab.scripts.play \
 ```bash
 python -m mjlab.scripts.play \
   Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation \
-  --motion-file $PWD/motions/chunwan/90_15_stageii_unitree_g1.npz \
+  --motion-file $PWD/motions/chunwan/88_05_stageii_unitree_g1.npz \
   --keep-randomization True
 ```
 
