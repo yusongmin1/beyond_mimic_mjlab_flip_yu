@@ -1,4 +1,12 @@
-"""Sim-to-sim: run an mjlab / Isaac G1 tracking policy in MuJoCo (explicit PD torque).
+"""Sim-to-Sim: run mjlab / Isaac G1 tracking policies in MuJoCo (explicit PD torque).
+
+Policies: every run under ``logs/rsl_rl/g1_tracking/`` that has an exported
+motion-ONNX (``exported/policy.onnx``; use ``scripts/export_g1_tracking_onnx.py``
+to batch-export). The ONNX embeds the FULL reference motion (joint pos/vel +
+14 tracking bodies) and takes ``(obs, time_step)``; the reference for the ghost
+and reset is read straight out of the graph — no external ``--motion_file``
+needed. A plain ``.pt``/``.onnx`` policy path plus explicit ``--motion_file``
+is still supported.
 
 PD gains / armature / per-joint action scales match
 ``mjlab.asset_zoo.robots.unitree_g1.g1_constants`` (NATURAL_FREQ=10 Hz, ζ=2):
@@ -10,38 +18,54 @@ PD gains / armature / per-joint action scales match
     4010        0.004250000   16.7783    1.0681     5       0.0745   (wrist_pitch/yaw)
     2×5020      0.007219450   28.5012    1.8144    50       0.4386   (ankle, waist_pitch/roll)
 
+NOTE: g1_tracking ONNX metadata stores the TRUE training action_scale
+(0.518 / 0.330 / 0.560 / 0.128); it overrides the table above when present.
+
 Anchor body is ``torso_link`` (same as G1 tracking env). Observation default is
 Wo-State-Estimation (154-D); pass ``--with_state_estimation`` for 160-D.
 
+Starts in **RL locomotion** (legged_lab_yu 29-DoF ``policy_dwaq.pt``). Press ``[`` / ``]``
+or ``0-9`` to run a mimic skill; when that motion finishes it auto-returns to RL.
+
 .. code-block:: bash
 
-    cd /path/to/mjlab-dev-go2-mimic
-    python scripts/sim2sim_g1_mujoco.py \\
-        --policy path/to/policy.pt \\
-        --motion_file motions/g1_fallandgetup1_850_940.npz \\
-        --match_isaac
+    # list every available mimic policy
+    python scripts/sim2sim_g1_mujoco.py --list
 
-    # plant check (PD tracks reference joints, no policy)
-    python scripts/sim2sim_g1_mujoco.py --policy unused.pt --motion_file ... --replay --match_isaac --headless
+    # start in RL; hot-switch to mimic skills in the viewer
+    python scripts/sim2sim_g1_mujoco.py --match_isaac
+    python scripts/sim2sim_g1_mujoco.py --policy 88_05 --match_isaac   # default mimic cursor
+
+    # start directly in a mimic skill (still returns to RL when done)
+    python scripts/sim2sim_g1_mujoco.py --policy 88_05 --start_mimic --match_isaac
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import glob
 import os
 import re
+import sys
 import time
 
 import numpy as np
 
 parser = argparse.ArgumentParser(description="G1 sim2sim in MuJoCo (mjlab kp/kd).")
-parser.add_argument("--policy", type=str, required=True, help="TorchScript policy.pt / rsl_rl model_*.pt / onnx.")
-parser.add_argument("--motion_file", type=str, required=True, help="Reference motion npz.")
-parser.add_argument("--xml", type=str, default=None, help="MuJoCo g1 xml (default: mjlab unitree_g1/xmls/g1.xml).")
+parser.add_argument(
+    "--policy",
+    type=str,
+    default=None,
+    help="Default mimic skill cursor: INDEX (see --list), SUBSTRING, or path. "
+    "Start mode is still RL unless --start_mimic.",
+)
+parser.add_argument("--list", action="store_true", help="list available g1_tracking policies and exit.")
+parser.add_argument("--motion_file", type=str, default=None, help="External reference motion npz (only for non-embedded policies).")
+parser.add_argument("--xml", type=str, default=None, help="MuJoCo g1 xml (default: unitree_g1/xmls/g1_scene.xml).")
 parser.add_argument("--speed", type=float, default=1.0, help="Playback speed.")
-parser.add_argument("--kp", type=float, default=None, help="Uniform PD stiffness override.")
-parser.add_argument("--kd", type=float, default=None, help="Uniform PD damping override.")
+parser.add_argument("--kp", type=float, default=None, help="Uniform PD stiffness override (mimic mode).")
+parser.add_argument("--kd", type=float, default=None, help="Uniform PD damping override (mimic mode).")
 parser.add_argument(
     "--action_scale",
     type=float,
@@ -53,7 +77,11 @@ parser.add_argument(
     action="store_true",
     help="Include motion_anchor_pos_b + base_lin_vel (160-D). Default is Wo-SE 154-D.",
 )
-parser.add_argument("--no_loop", action="store_true", help="Stop at end of motion.")
+parser.add_argument(
+    "--loop_mimic",
+    action="store_true",
+    help="Loop the mimic skill instead of auto-returning to RL when the motion ends.",
+)
 parser.add_argument("--no_ghost", action="store_true", help="Do not draw reference ghost.")
 parser.add_argument(
     "--match_isaac",
@@ -62,9 +90,32 @@ parser.add_argument(
 )
 parser.add_argument("--headless", action="store_true", help="No viewer; one motion pass then exit.")
 parser.add_argument(
+    "--settle",
+    type=float,
+    default=0.0,
+    help="Seconds of PD-hold on frame 0 before the policy starts (default 0).",
+)
+parser.add_argument(
     "--replay",
     action="store_true",
     help="Bypass policy; PD-track reference joint angles (plant sanity check).",
+)
+parser.add_argument(
+    "--rl_policy",
+    type=str,
+    default=None,
+    help="Path to Legged Lab G1 locomotion TorchScript (default: policies/g1_lab/policy_dwaq.pt).",
+)
+parser.add_argument(
+    "--rl_config",
+    type=str,
+    default=None,
+    help="YAML for Legged Lab RL (default: configs/g1_legged_lab_rl.yaml).",
+)
+parser.add_argument(
+    "--start_mimic",
+    action="store_true",
+    help="Start in mimic mode (requires --policy). Default is RL locomotion.",
 )
 args = parser.parse_args()
 
@@ -74,8 +125,9 @@ import mujoco.viewer
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _MJLAB_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, ".."))
 _DEFAULT_XML = os.path.join(
-    _MJLAB_ROOT, "src", "mjlab", "asset_zoo", "robots", "unitree_g1", "xmls", "g1.xml"
+    _MJLAB_ROOT, "src", "mjlab", "asset_zoo", "robots", "unitree_g1", "xmls", "g1_scene.xml"
 )
+_TRACKING_DIR = os.path.join(_MJLAB_ROOT, "logs", "rsl_rl", "g1_tracking")
 
 # Joint order used by mjlab csv_to_npz / G1 entity (matches g1.xml qpos order).
 JOINT_NAMES = [
@@ -110,6 +162,24 @@ JOINT_NAMES = [
     "right_wrist_yaw_joint",
 ]
 N = len(JOINT_NAMES)  # 29
+
+# 14 tracking bodies embedded in the g1_tracking motion-ONNX.
+TRACKING_BODIES = [
+    "pelvis",
+    "left_hip_roll_link",
+    "left_knee_link",
+    "left_ankle_roll_link",
+    "right_hip_roll_link",
+    "right_knee_link",
+    "right_ankle_roll_link",
+    "torso_link",
+    "left_shoulder_roll_link",
+    "left_elbow_link",
+    "left_wrist_yaw_link",
+    "right_shoulder_roll_link",
+    "right_elbow_link",
+    "right_wrist_yaw_link",
+]
 
 # mjlab g1_constants: armature from two-stage planetary reflected inertia.
 ARMATURE_5020 = 0.003609725
@@ -168,23 +238,7 @@ DEFAULT_JOINT_POS["left_shoulder_pitch_joint"] = 0.2
 DEFAULT_JOINT_POS["right_shoulder_roll_joint"] = -0.2
 DEFAULT_JOINT_POS["right_shoulder_pitch_joint"] = 0.2
 
-# Tracking keypoint bodies for ghost (same as G1 env body_names)
-GHOST_BODIES = [
-    "pelvis",
-    "left_hip_roll_link",
-    "left_knee_link",
-    "left_ankle_roll_link",
-    "right_hip_roll_link",
-    "right_knee_link",
-    "right_ankle_roll_link",
-    "torso_link",
-    "left_shoulder_roll_link",
-    "left_elbow_link",
-    "left_wrist_yaw_link",
-    "right_shoulder_roll_link",
-    "right_elbow_link",
-    "right_wrist_yaw_link",
-]
+# Tracking keypoint bodies for ghost (indices into TRACKING_BODIES)
 GHOST_EDGES = [
     ("pelvis", "left_hip_roll_link"),
     ("left_hip_roll_link", "left_knee_link"),
@@ -203,64 +257,102 @@ GHOST_EDGES = [
 
 ANCHOR_BODY = "torso_link"
 
+# npz body index (mjcf 30-body tree order) for each of the 14 tracking bodies.
+NPZ_BODY_IDX_30 = [0, 2, 4, 6, 8, 10, 12, 15, 17, 19, 22, 24, 26, 29]
+
+
+# ----------------------------------------------------------------- policy discovery
+def list_policies() -> list[tuple[str, str]]:
+    """All (display_name, path) pairs from g1_tracking exported ONNX files.
+
+    A run directory can contain BOTH a fresh ``exported/policy.onnx`` and a
+    legacy ``<run>.onnx`` dropped by an older exporter. When both exist,
+    prefer ``exported/policy.onnx`` and hide the legacy file.
+    """
+    fresh: dict[str, str] = {}
+    legacy: dict[str, str] = {}
+    for onnx_file in glob.glob(os.path.join(_TRACKING_DIR, "*", "exported", "policy.onnx")):
+        run = os.path.basename(os.path.dirname(os.path.dirname(onnx_file)))
+        fresh[run] = onnx_file
+    for onnx_file in glob.glob(os.path.join(_TRACKING_DIR, "*", "*.onnx")):
+        run = os.path.basename(os.path.dirname(onnx_file))
+        if run not in legacy:
+            legacy[run] = onnx_file
+    out = []
+    for run in sorted(set(fresh) | set(legacy)):
+        if run in fresh:
+            out.append((run, fresh[run]))
+        else:
+            out.append((run + " (legacy onnx)", legacy[run]))
+    return out
+
+
+def resolve_policy(spec: str) -> str:
+    polys = list_policies()
+    if spec.isdigit():
+        i = int(spec)
+        if 0 <= i < len(polys):
+            return polys[i][1]
+        raise SystemExit(f"[ERROR] policy index {i} out of range (0..{len(polys) - 1}); see --list")
+    if os.path.isfile(spec):
+        return spec
+    hits = [p for name, p in polys if spec.lower() in name.lower()]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        print("[ERROR] ambiguous policy substring, matches:")
+        for name, p in polys:
+            if spec.lower() in name.lower():
+                print("   ", name)
+        raise SystemExit(1)
+    raise SystemExit(f"[ERROR] no policy matches '{spec}'; see --list")
+
+
+if args.list:
+    polys = list_policies()
+    print(f"{len(polys)} g1_tracking policies in {_TRACKING_DIR}:")
+    for i, (name, p) in enumerate(polys):
+        print(f"  [{i:2d}] {name}")
+        print(f"        {os.path.relpath(p, _MJLAB_ROOT)}")
+    raise SystemExit(0)
+
+sys.path.insert(0, _SCRIPT_DIR)
+from g1_legged_lab_locomotion import (  # noqa: E402
+    LeggedLabG1Controller,
+    default_config_path,
+)
+
+POLICIES = list_policies()
+if not POLICIES and args.policy is None:
+    raise SystemExit("[ERROR] no g1_tracking policies found; need at least one for mimic skills")
+
+if args.policy is not None:
+    policy_path = resolve_policy(args.policy)
+    try:
+        cur_policy_idx = next(i for i, (n, p) in enumerate(POLICIES) if os.path.samefile(p, policy_path))
+    except (StopIteration, OSError):
+        POLICIES.insert(0, ("(adhoc) " + os.path.basename(policy_path), policy_path))
+        cur_policy_idx = 0
+else:
+    cur_policy_idx = 0
+
+if args.start_mimic and args.policy is None:
+    parser.error("--start_mimic requires --policy")
+
+start_mode = "MIMIC" if args.start_mimic else "RL"
+
+
 # ----------------------------------------------------------------- setup
 xml_path = args.xml or _DEFAULT_XML
-# g1.xml has no ground plane; inject one so the robot does not freefall forever.
-spec = mujoco.MjSpec.from_file(xml_path)
-floor = spec.worldbody.add_geom()
-floor.name = "floor"
-floor.type = mujoco.mjtGeom.mjGEOM_PLANE
-floor.size[:] = [0, 0, 0.05]
-floor.rgba[:] = [0.25, 0.35, 0.45, 1.0]
-model = spec.compile()
+model = mujoco.MjModel.from_xml_path(xml_path)
 data = mujoco.MjData(model)
 model.opt.timestep = 0.005
 ctrl_dt = 0.02
 decimation = round(ctrl_dt / model.opt.timestep)
 
-motion = np.load(args.motion_file, allow_pickle=True)
-fps = float(np.asarray(motion["fps"]).item())
-assert abs(fps * ctrl_dt - 1.0) < 1e-6, f"motion fps ({fps}) must match control rate ({1 / ctrl_dt})"
-
-if "joint_names" in motion:
-    npz_joint_names = [str(n) for n in np.asarray(motion["joint_names"]).ravel().tolist()]
-else:
-    npz_joint_names = list(JOINT_NAMES)
-    print("[INFO]: npz has no joint_names; assuming mjlab G1 order")
-assert len(npz_joint_names) == N, f"expected {N} joints, got {len(npz_joint_names)}"
-
-ref_joint_pos = np.asarray(motion["joint_pos"], dtype=np.float64)
-ref_joint_vel = np.asarray(motion["joint_vel"], dtype=np.float64)
-ref_all_body_pos = np.asarray(motion["body_pos_w"], dtype=np.float64)  # (T, B, 3)
-ref_all_body_quat = np.asarray(motion["body_quat_w"], dtype=np.float64)  # (T, B, 4) wxyz
-ref_all_body_lin = np.asarray(motion["body_lin_vel_w"], dtype=np.float64)
-ref_all_body_ang = np.asarray(motion["body_ang_vel_w"], dtype=np.float64)
-T = ref_joint_pos.shape[0]
-
-# Body names in npz == mujoco bodies excluding world (index 0 = pelvis)
-mj_body_names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i) for i in range(1, model.nbody)]
-if "body_names" in motion:
-    npz_body_names = [str(n) for n in np.asarray(motion["body_names"]).ravel().tolist()]
-else:
-    npz_body_names = mj_body_names
-    assert len(npz_body_names) == ref_all_body_pos.shape[1], (
-        f"body count mismatch: model {len(npz_body_names)} vs npz {ref_all_body_pos.shape[1]}"
-    )
-    print("[INFO]: npz has no body_names; assuming mujoco order without world")
-
-anchor_npz_idx = npz_body_names.index(ANCHOR_BODY)
-ref_anchor_pos = ref_all_body_pos[:, anchor_npz_idx]
-ref_anchor_quat = ref_all_body_quat[:, anchor_npz_idx]
-# Root (pelvis) for reset / free-joint state
-pelvis_npz_idx = npz_body_names.index("pelvis")
-ref_pelvis_pos = ref_all_body_pos[:, pelvis_npz_idx]
-ref_pelvis_quat = ref_all_body_quat[:, pelvis_npz_idx]
-ref_pelvis_lin = ref_all_body_lin[:, pelvis_npz_idx]
-ref_pelvis_ang = ref_all_body_ang[:, pelvis_npz_idx]
-
-# name maps: policy/npz order <-> mujoco qpos/dof
+# name maps: policy/npz order <-> mujoco qpos/dof (mjlab order == XML order)
 mj_qpos_adr, mj_dof_adr = [], []
-for name in npz_joint_names:
+for name in JOINT_NAMES:
     jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
     assert jid >= 0, f"joint '{name}' not in mujoco model"
     mj_qpos_adr.append(model.jnt_qposadr[jid])
@@ -268,23 +360,20 @@ for name in npz_joint_names:
 mj_qpos_adr = np.asarray(mj_qpos_adr)
 mj_dof_adr = np.asarray(mj_dof_adr)
 
-default_q = np.array([DEFAULT_JOINT_POS[n] for n in npz_joint_names], dtype=np.float64)
+default_q = np.array([DEFAULT_JOINT_POS[n] for n in JOINT_NAMES], dtype=np.float64)
 kp_j = np.zeros(N, dtype=np.float64)
 kd_j = np.zeros(N, dtype=np.float64)
 arm_j = np.zeros(N, dtype=np.float64)
 effort_j = np.zeros(N, dtype=np.float64)
 scale_j = np.zeros(N, dtype=np.float64)
-for i, name in enumerate(npz_joint_names):
+for i, name in enumerate(JOINT_NAMES):
     kp, kd, arm, effort = _joint_props(name)
     kp_j[i] = args.kp if args.kp is not None else kp
     kd_j[i] = args.kd if args.kd is not None else kd
     arm_j[i] = arm
     effort_j[i] = effort
-    scale_j[i] = args.action_scale if args.action_scale is not None else (0.25 * effort / kp)
-
-print("kp:", np.array2string(kp_j, precision=3, suppress_small=True))
-print("kd:", np.array2string(kd_j, precision=3, suppress_small=True))
-print("action_scale:", np.array2string(scale_j, precision=4, suppress_small=True))
+    scale_j[i] = 0.25 * effort / kp
+scale_default_j = scale_j.copy()
 
 if args.match_isaac:
     for adr, arm in zip(mj_dof_adr, arm_j):
@@ -302,72 +391,180 @@ obs_dim = 160 if args.with_state_estimation else 154
 print(f"obs_dim={obs_dim} ({'with' if args.with_state_estimation else 'wo'} state estimation)")
 
 
+# ----------------------------------------------------------------- policy + motion
 def load_policy(path: str):
-    """obs(obs_dim,) -> action(29,)."""
-    if path.endswith(".pt"):
-        import torch
+    """Returns (run_fn, meta_dict, embedded_motion_or_None)."""
+    if path.endswith(".onnx"):
+        import onnx
+        import onnxruntime as ort
 
-        try:
-            module = torch.jit.load(path, map_location="cpu").eval()
+        session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+        meta = dict(session.get_modelmeta().custom_metadata_map)
 
-            @torch.no_grad()
-            def run_ts(obs: np.ndarray) -> np.ndarray:
-                out = module(torch.from_numpy(obs.astype(np.float32))[None, :], torch.zeros(1, 1, dtype=torch.long))
-                if isinstance(out, (tuple, list)):
-                    out = out[0]
-                return out[0].numpy()
+        # Embedded motion? Extract arrays straight from graph initializers.
+        emb = _extract_embedded_motion(path)
+        if emb is not None:
+            def run(obs: np.ndarray, t: int) -> np.ndarray:
+                return session.run(
+                    ["actions"],
+                    {"obs": obs[None, :].astype(np.float32),
+                     "time_step": np.array([[t]], dtype=np.float32)},
+                )[0][0]
+            return run, meta, emb
 
-            # smoke-check dim
-            try:
-                run_ts(np.zeros(obs_dim, dtype=np.float32))
-            except Exception as e:
-                print(f"[WARN]: torchscript smoke test failed ({e}); continuing anyway")
-            return run_ts
-        except RuntimeError:
-            pass
+        def run_plain(obs: np.ndarray, t: int) -> np.ndarray:
+            return session.run(
+                ["actions"],
+                {"obs": obs[None, :].astype(np.float32),
+                 "time_step": np.array([[0]], dtype=np.float32)},
+            )[0][0]
+        return run_plain, meta, None
 
-        ckpt = torch.load(path, map_location="cpu", weights_only=False)
-        sd = ckpt["model_state_dict"]
-        actor_layers = []
-        i = 0
-        while f"actor.{i}.weight" in sd:
-            actor_layers.append(torch.nn.Linear(sd[f"actor.{i}.weight"].shape[1], sd[f"actor.{i}.weight"].shape[0]))
-            actor_layers.append(torch.nn.ELU())
-            i += 2
-        del actor_layers[-1]
-        actor = torch.nn.Sequential(*actor_layers)
-        actor.load_state_dict({k[len("actor."):]: v for k, v in sd.items() if k.startswith("actor.")}, strict=True)
-        actor.eval()
-        norm = ckpt["obs_norm_state_dict"]
-        norm_mean, norm_std = norm["_mean"][0], norm["_std"][0]
+    # .pt: TorchScript or rsl_rl checkpoint (legacy external-motion mode)
+    import torch
+
+    try:
+        module = torch.jit.load(path, map_location="cpu").eval()
 
         @torch.no_grad()
-        def run_ckpt(obs: np.ndarray) -> np.ndarray:
-            x = torch.from_numpy(obs.astype(np.float32))
-            x = (x - norm_mean) / (norm_std + 1e-2)
-            return actor(x).numpy()
+        def run_ts(obs: np.ndarray, t: int) -> np.ndarray:
+            out = module(
+                torch.from_numpy(obs.astype(np.float32))[None, :],
+                torch.zeros(1, 1, dtype=torch.long),
+            )
+            if isinstance(out, (tuple, list)):
+                out = out[0]
+            return out[0].numpy()
+        return run_ts, {}, None
+    except RuntimeError:
+        pass
 
-        return run_ckpt
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    sd = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt["actor_state_dict"]
+    norm_key = "obs_norm_state_dict" if "obs_norm_state_dict" in ckpt else None
+    if norm_key is not None:
+        norm = ckpt[norm_key]
+        norm_mean, norm_std = norm["_mean"][0] if norm["_mean"].dim() == 2 else norm["_mean"], \
+                              norm["_std"][0] if norm["_std"].dim() == 2 else norm["_std"]
+    else:
+        norm_mean = sd["obs_normalizer._mean"][0]
+        norm_std = sd["obs_normalizer._std"][0]
+    import torch.nn as nn
+    actor_layers = []
+    i = 0
+    while f"mlp.{i}.weight" in sd:
+        actor_layers.append(nn.Linear(sd[f"mlp.{i}.weight"].shape[1], sd[f"mlp.{i}.weight"].shape[0]))
+        actor_layers.append(nn.ELU())
+        i += 2
+    del actor_layers[-1]
+    actor = nn.Sequential(*actor_layers)
+    actor.load_state_dict({k[len("mlp."):]: v for k, v in sd.items() if k.startswith("mlp.")})
+    actor.eval()
 
-    import onnxruntime as ort
-
-    session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
-
-    def run(obs: np.ndarray) -> np.ndarray:
-        return session.run(["actions"], {"obs": obs[None, :].astype(np.float32), "time_step": np.array([[0]], dtype=np.int64)})[0][0]
-
-    return run
+    @torch.no_grad()
+    def run_ckpt(obs: np.ndarray, t: int) -> np.ndarray:
+        x = torch.from_numpy(obs.astype(np.float32))
+        x = (x - norm_mean) / (norm_std + 1e-2)
+        return actor(x[None, :])[0].numpy()
+    return run_ckpt, {}, None
 
 
-policy = (lambda obs: np.zeros(N, dtype=np.float32)) if args.replay else load_policy(args.policy)
-print(f"policy: {'REPLAY' if args.replay else args.policy}")
-print(f"motion: {args.motion_file} ({T} frames @ {fps} fps, {T / fps:.2f} s)")
+def _extract_embedded_motion(onnx_path: str):
+    """Pull (T,29)/(T,14,·) motion arrays out of a motion-ONNX's initializers."""
+    import onnx
+
+    m = onnx.load(onnx_path)
+
+    def to_np(init):
+        if init.data_type == onnx.TensorProto.FLOAT and init.raw_data:
+            return np.frombuffer(init.raw_data, dtype=np.float32).reshape(list(init.dims))
+        return np.asarray(onnx.numpy_helper.to_array(init))
+
+    found = {}
+    for init in m.graph.initializer:
+        d = list(init.dims)
+        for key, sig in [
+            ("joint_pos", (None, N)),
+            ("joint_vel", (None, N)),
+            ("body_pos_w", (None, len(TRACKING_BODIES), 3)),
+            ("body_quat_w", (None, len(TRACKING_BODIES), 4)),
+            ("body_lin_vel_w", (None, len(TRACKING_BODIES), 3)),
+            ("body_ang_vel_w", (None, len(TRACKING_BODIES), 3)),
+        ]:
+            if init.name.startswith(key) and len(d) == len(sig) and (d[1] == sig[1]) and (len(d) < 3 or d[2] == sig[2]):
+                found[key] = to_np(init).astype(np.float64)
+    if len(found) == 6:
+        return found
+    return None
+
+
+if args.action_scale is not None:
+    scale_j[:] = args.action_scale
+
+# ----------------------------------------------------------------- runtime
+# Hot-switchable runtime: bundles policy fn + embedded motion + per-policy
+# action scale so the viewer can swap everything with ONE keystroke.
+class Runtime:
+    def __init__(self, idx: int):
+        name, path = POLICIES[idx]
+        self.idx = idx
+        self.name = name
+        self.path = path
+        run, meta, emb = load_policy(path)
+        self.run = run                      # obs,t -> action(29)
+        self.meta = meta
+        self.emb = emb
+        # action scale: metadata > global table
+        self.scale = scale_j.copy()
+        csv = meta.get("action_scale")
+        if csv:
+            vals = [float(x) for x in csv.split(",")]
+            if len(vals) == N:
+                self.scale[:] = vals
+        if args.action_scale is not None:
+            self.scale[:] = args.action_scale
+
+    @property
+    def motion_arrays(self):
+        emb = self.emb if self.emb is not None else _extract_embedded_motion(self.path)
+        return emb
+
+    def switch(self, idx: int) -> "Runtime":
+        """Build the next Runtime; returns self if the new one is broken."""
+        try:
+            nxt = Runtime(idx)
+            if nxt.emb is None and args.motion_file is None:
+                raise RuntimeError("no embedded motion")
+            return nxt
+        except Exception as e:
+            print(f"[switch] FAILED to load {POLICIES[idx][0]}: {e}")
+            return self
+
+
+# ---- RL locomotion (legged_lab 29dof) + mimic tracking FSM ------------------
+locomo = LeggedLabG1Controller(
+    config_path=args.rl_config or default_config_path(),
+    policy_path=args.rl_policy,
+)
+rl_kp_j, rl_kd_j = locomo.rl_gains_mj()
+rl_stand_q = locomo.stand_pose_mj()
+print(f"RL loco: {locomo.path}")
+print(f"RL cfg : {locomo.cfg_path}")
+
+rt = None  # mimic Runtime; created on first enter
+M = {"jp": None, "jv": None, "bp": None, "bq": None, "bl": None, "ba": None}
+T = 1
+ref_anchor_pos = None
+ref_anchor_quat = None
+
+npz_body_names = TRACKING_BODIES
+anchor_npz_idx = npz_body_names.index(ANCHOR_BODY)
+pelvis_npz_idx = npz_body_names.index("pelvis")
 
 ghost_edge_idx = []
 if not args.no_ghost:
     for a, b in GHOST_EDGES:
-        if a in npz_body_names and b in npz_body_names:
-            ghost_edge_idx.append((npz_body_names.index(a), npz_body_names.index(b)))
+        ghost_edge_idx.append((npz_body_names.index(a), npz_body_names.index(b)))
 
 
 def quat_to_mat(q: np.ndarray) -> np.ndarray:
@@ -382,24 +579,171 @@ def quat_to_mat(q: np.ndarray) -> np.ndarray:
     )
 
 
+def quat_conj(q: np.ndarray) -> np.ndarray:
+    return np.array([q[0], -q[1], -q[2], -q[3]], dtype=np.float64)
+
+
+def quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return np.array(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ],
+        dtype=np.float64,
+    )
+
+
+def yaw_quat(q: np.ndarray) -> np.ndarray:
+    """Keep only yaw of wxyz quat (mjlab ``yaw_quat``)."""
+    w, x, y, z = q
+    yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    return np.array([np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0)], dtype=np.float64)
+
+
+def quat_apply(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Rotate vector(s) by wxyz quat. ``v`` shape (3,) or (..., 3)."""
+    q = np.asarray(q, dtype=np.float64).reshape(4)
+    v = np.asarray(v, dtype=np.float64)
+    xyz = q[1:]
+    t = np.cross(xyz, v) * 2.0
+    return v + q[0] * t + np.cross(xyz, t)
+
+
+def motion_anchor_ori_b(q_robot: np.ndarray, q_ref: np.ndarray) -> np.ndarray:
+    """mjlab ``motion_anchor_ori_b``: first two columns of R(q_robot^{-1} * q_ref)."""
+    q_rel = quat_mul(quat_conj(q_robot), q_ref)
+    return quat_to_mat(q_rel)[:, :2].reshape(-1)
+
+
 def clip_effort(effort: np.ndarray) -> np.ndarray:
     return np.clip(effort, -effort_j, effort_j)
 
 
-def reset(t0: int = 0):
+def _bind_motion(emb_new):
+    global T, ref_anchor_pos, ref_anchor_quat
+    M["jp"], M["jv"] = emb_new["joint_pos"], emb_new["joint_vel"]
+    M["bp"], M["bq"] = emb_new["body_pos_w"], emb_new["body_quat_w"]
+    M["bl"], M["ba"] = emb_new["body_lin_vel_w"], emb_new["body_ang_vel_w"]
+    T = M["jp"].shape[0]
+    ref_anchor_pos = M["bp"][:, anchor_npz_idx]
+    ref_anchor_quat = M["bq"][:, anchor_npz_idx]
+
+
+def align_motion_to_robot(emb_raw: dict) -> dict:
+    """Yaw+XY align motion to current robot anchor (mjlab ``body_*_relative_w``).
+
+    Training resets the robot onto the motion, so ``motion_anchor_ori_b`` starts
+    near identity. Entering mimic from RL without teleport must rotate/translate
+    the reference into the robot's current heading/position, otherwise the ori
+    obs is dominated by an arbitrary world-yaw offset.
+    """
+    mujoco.mj_forward(model, data)
+    q_robot = data.xquat[anchor_body_id].astype(np.float64).copy()
+    p_robot = data.xpos[anchor_body_id].astype(np.float64).copy()
+
+    bp0 = np.asarray(emb_raw["body_pos_w"], dtype=np.float64).copy()
+    bq0 = np.asarray(emb_raw["body_quat_w"], dtype=np.float64).copy()
+    bl0 = np.asarray(emb_raw["body_lin_vel_w"], dtype=np.float64).copy()
+    ba0 = np.asarray(emb_raw["body_ang_vel_w"], dtype=np.float64).copy()
+
+    q_ref0 = bq0[0, anchor_npz_idx]
+    p_ref0 = bp0[0, anchor_npz_idx]
+    # delta_ori = yaw(q_robot * q_ref^{-1})  — same as MotionCommand._update_command
+    delta_q = yaw_quat(quat_mul(q_robot, quat_conj(q_ref0)))
+
+    # positions: robot_xy + ref_z  +  R_yaw * (p_ref - p_ref_anchor)
+    rel = bp0 - p_ref0  # (T, B, 3)
+    rel_r = quat_apply(delta_q, rel)
+    bp = rel_r.copy()
+    bp[..., 0] += p_robot[0]
+    bp[..., 1] += p_robot[1]
+    bp[..., 2] += p_ref0[2]
+
+    # quats / world velocities: rotate by the same yaw
+    bq = np.zeros_like(bq0)
+    for t_i in range(bq0.shape[0]):
+        for b_i in range(bq0.shape[1]):
+            bq[t_i, b_i] = quat_mul(delta_q, bq0[t_i, b_i])
+            n = np.linalg.norm(bq[t_i, b_i])
+            if n > 1e-8:
+                bq[t_i, b_i] /= n
+    bl = quat_apply(delta_q, bl0)
+    ba = quat_apply(delta_q, ba0)
+
+    return {
+        "joint_pos": np.asarray(emb_raw["joint_pos"], dtype=np.float64),
+        "joint_vel": np.asarray(emb_raw["joint_vel"], dtype=np.float64),
+        "body_pos_w": bp,
+        "body_quat_w": bq,
+        "body_lin_vel_w": bl,
+        "body_ang_vel_w": ba,
+    }
+
+
+def load_mimic(idx: int) -> bool:
+    """Load / switch mimic Runtime; stash raw emb (unaligned)."""
+    global rt
+    if rt is None:
+        try:
+            rt = Runtime(idx)
+        except Exception as e:
+            print(f"[mimic] FAILED to load {POLICIES[idx][0]}: {e}")
+            return False
+    else:
+        new_rt = rt.switch(idx)
+        if new_rt is rt and idx != rt_idx[0]:
+            return False
+        rt = new_rt
+    emb_new = rt.emb if rt.emb is not None else _extract_embedded_motion(rt.path)
+    if emb_new is None and args.motion_file is not None:
+        motion = np.load(args.motion_file, allow_pickle=True)
+        emb_new = {
+            "joint_pos": np.asarray(motion["joint_pos"], dtype=np.float64),
+            "joint_vel": np.asarray(motion["joint_vel"], dtype=np.float64),
+            "body_pos_w": np.asarray(motion["body_pos_w"], dtype=np.float64)[:, NPZ_BODY_IDX_30],
+            "body_quat_w": np.asarray(motion["body_quat_w"], dtype=np.float64)[:, NPZ_BODY_IDX_30],
+            "body_lin_vel_w": np.asarray(motion["body_lin_vel_w"], dtype=np.float64)[:, NPZ_BODY_IDX_30],
+            "body_ang_vel_w": np.asarray(motion["body_ang_vel_w"], dtype=np.float64)[:, NPZ_BODY_IDX_30],
+        }
+    if emb_new is None:
+        print(f"[mimic] {rt.name} has no embedded motion; aborted")
+        return False
+    rt_idx[0] = idx
+    rt.emb_raw = {k: np.asarray(v, dtype=np.float64).copy() for k, v in emb_new.items()}
+    _bind_motion(rt.emb_raw)
+    print(f"\n[mimic] -> [{idx}] {rt.name}  (T={T}, {T / 50:.1f}s)")
+    return True
+
+
+def reset_mimic(t0: int = 0):
     mujoco.mj_resetData(model, data)
-    data.qpos[free_adr : free_adr + 3] = ref_pelvis_pos[t0]
-    data.qpos[free_adr + 3 : free_adr + 7] = ref_pelvis_quat[t0]
-    data.qpos[mj_qpos_adr] = ref_joint_pos[t0]
-    R = quat_to_mat(ref_pelvis_quat[t0])
-    data.qvel[0:3] = ref_pelvis_lin[t0]
-    data.qvel[3:6] = R.T @ ref_pelvis_ang[t0]
-    data.qvel[mj_dof_adr] = ref_joint_vel[t0]
+    data.qpos[free_adr : free_adr + 3] = M["bp"][t0, pelvis_npz_idx]
+    data.qpos[free_adr + 3 : free_adr + 7] = M["bq"][t0, pelvis_npz_idx]
+    data.qpos[mj_qpos_adr] = M["jp"][t0]
+    data.qvel[:] = 0.0
+    data.qfrc_applied[:] = 0.0
+    mujoco.mj_forward(model, data)
+
+
+def reset_rl_stand():
+    """Spawn standing pose for locomotion RL (rl_sar defaults)."""
+    mujoco.mj_resetData(model, data)
+    data.qpos[free_adr : free_adr + 3] = [0.0, 0.0, 0.78]
+    data.qpos[free_adr + 3 : free_adr + 7] = [1.0, 0.0, 0.0, 0.0]
+    data.qpos[mj_qpos_adr] = rl_stand_q
+    data.qvel[:] = 0.0
     data.qfrc_applied[:] = 0.0
     mujoco.mj_forward(model, data)
 
 
 def draw_ghost(scn, t: int):
+    if M["bp"] is None:
+        scn.ngeom = 0
+        return
     scn.ngeom = 0
     for a, b in ghost_edge_idx:
         if scn.ngeom >= scn.maxgeom:
@@ -412,24 +756,168 @@ def draw_ghost(scn, t: int):
             g,
             mujoco.mjtGeom.mjGEOM_LINE,
             0.01,
-            ref_all_body_pos[t, a].astype(np.float64),
-            ref_all_body_pos[t, b].astype(np.float64),
+            M["bp"][t, a].astype(np.float64),
+            M["bp"][t, b].astype(np.float64),
         )
         scn.ngeom += 1
 
 
-def apply_pd(q_des: np.ndarray):
+def apply_pd(q_des: np.ndarray, kp=None, kd=None):
     """Write joint torques into qfrc_applied (g1.xml has no <actuator>)."""
     q = data.qpos[mj_qpos_adr]
     qd = data.qvel[mj_dof_adr]
-    tau = clip_effort(kp_j * (q_des - q) - kd_j * qd)
+    kp_use = kp_j if kp is None else kp
+    kd_use = kd_j if kd is None else kd
+    tau = clip_effort(kp_use * (q_des - q) - kd_use * qd)
     data.qfrc_applied[:] = 0.0
     data.qfrc_applied[mj_dof_adr] = tau
 
 
-# ----------------------------------------------------------------- loop
+# ---- hot-switch state machine ------------------------------------------
 obs = np.zeros(obs_dim, dtype=np.float32)
 last_action = np.zeros(N, dtype=np.float32)
+cur_t = [0]
+mode = {"name": start_mode}  # "RL" | "MIMIC"
+switch_request = {"idx": None}       # enter / switch mimic
+rl_request = {"flag": False}         # return to RL
+reset_request = {"flag": False}
+paused = {"flag": False}
+rt_idx = [cur_policy_idx]
+
+KEY_LBRACKET, KEY_RBRACKET = 91, 93
+KEY_SPACE, KEY_R, KEY_L, KEY_C = 32, 82, 76, 67
+KEY_0, KEY_9 = 48, 57
+KEY_W, KEY_A, KEY_S, KEY_D = 87, 65, 83, 68
+KEY_Q, KEY_E = 81, 69
+
+
+def key_callback(key):
+    if key == KEY_LBRACKET:
+        if POLICIES:
+            switch_request["idx"] = (rt_idx[0] - 1) % len(POLICIES)
+    elif key == KEY_RBRACKET:
+        if POLICIES:
+            switch_request["idx"] = (rt_idx[0] + 1) % len(POLICIES)
+    elif KEY_0 <= key <= KEY_9:
+        d = key - KEY_0
+        if d < len(POLICIES):
+            switch_request["idx"] = d
+    elif key == KEY_L:
+        rl_request["flag"] = True
+    elif key == KEY_SPACE:
+        paused["flag"] = not paused["flag"]
+    elif key == KEY_R:
+        reset_request["flag"] = True
+    elif key == KEY_C:
+        locomo.clear_command()
+    elif key == KEY_W:
+        locomo.nudge_command(dx=+1)
+    elif key == KEY_S:
+        locomo.nudge_command(dx=-1)
+    elif key == KEY_A:
+        locomo.nudge_command(dy=+1)
+    elif key == KEY_D:
+        locomo.nudge_command(dy=-1)
+    elif key == KEY_Q:
+        locomo.nudge_command(dyaw=+1)
+    elif key == KEY_E:
+        locomo.nudge_command(dyaw=-1)
+
+
+def enter_rl(hard_reset: bool = False):
+    mode["name"] = "RL"
+    locomo.enter()
+    last_action[:] = 0.0
+    if hard_reset:
+        reset_rl_stand()
+    print("\n[mode] -> RL locomotion")
+
+
+def enter_mimic(idx: int, hard_reset: bool = False) -> bool:
+    """Enter a mimic skill.
+
+    ``hard_reset=True`` teleports to motion frame 0 — sim/debug only.
+    Real-robot path (default): keep the current pose, yaw+XY-align the
+    reference to the robot so ``motion_anchor_ori_b`` starts near identity
+    (same as training reset), then track from t=0.
+    """
+    if not load_mimic(idx):
+        return False
+    mode["name"] = "MIMIC"
+    last_action[:] = 0.0
+    if hard_reset:
+        _bind_motion(rt.emb_raw)
+        reset_mimic(0)
+        print("[mode] -> MIMIC skill (teleport to frame 0, sim only)")
+    else:
+        aligned = align_motion_to_robot(rt.emb_raw)
+        _bind_motion(aligned)
+        # sanity: ori obs at t=0 should be near identity after yaw align
+        q_r = data.xquat[anchor_body_id].astype(np.float64)
+        ori0 = motion_anchor_ori_b(q_r, ref_anchor_quat[0])
+        print(
+            f"[mode] -> MIMIC skill (aligned to robot; "
+            f"ori0 L2-to-I={np.linalg.norm(ori0 - np.array([1, 0, 0, 1, 0, 0])):.3f})"
+        )
+    return True
+
+
+_HELP_LEFT = "W/S\nA/D\nQ/E\nC\n[/]\n0-9\nL\nSpace\nR"
+_HELP_RIGHT = (
+    "vx +/- (RL)\n"
+    "vy +/- (RL)\n"
+    "yaw +/- (RL)\n"
+    "clear cmd (RL)\n"
+    "mimic (if idle)\n"
+    "mimic (if idle)\n"
+    "back to RL\n"
+    "pause\n"
+    "reset mode"
+)
+
+
+def overlay(viewer):
+    status = "PAUSED" if paused["flag"] else "RUN"
+    if mode["name"] == "RL":
+        cmd = locomo.commands
+        viewer.set_texts([
+            (
+                mujoco.mjtFontScale.mjFONTSCALE_150,
+                mujoco.mjtGridPos.mjGRID_TOPRIGHT,
+                "mode\ncmd\nstatus",
+                f"RL locomotion\n"
+                f"vx={cmd[0]:+.2f} vy={cmd[1]:+.2f} yaw={cmd[2]:+.2f}\n"
+                f"{status}",
+            ),
+            (
+                mujoco.mjtFontScale.mjFONTSCALE_150,
+                mujoco.mjtGridPos.mjGRID_BOTTOMLEFT,
+                _HELP_LEFT,
+                _HELP_RIGHT,
+            ),
+        ])
+    else:
+        name = rt.name if rt and len(rt.name) <= 48 else ((rt.name[:45] + "...") if rt else "?")
+        viewer.set_texts([
+            (
+                mujoco.mjtFontScale.mjFONTSCALE_150,
+                mujoco.mjtGridPos.mjGRID_TOPRIGHT,
+                "mode\nmimic\nframe\nstatus",
+                f"MIMIC -> auto RL\n"
+                f"[{rt_idx[0]:2d}/{len(POLICIES) - 1}] {name}\n"
+                f"{cur_t[0]:4d} / {T}  ({cur_t[0] / 50.0:5.1f}s)\n"
+                f"{status}",
+            ),
+            (
+                mujoco.mjtFontScale.mjFONTSCALE_150,
+                mujoco.mjtGridPos.mjGRID_BOTTOMLEFT,
+                _HELP_LEFT,
+                _HELP_RIGHT,
+            ),
+        ])
+
+
+# ----------------------------------------------------------------- loop
 frame_dt = ctrl_dt / max(args.speed, 1e-6)
 
 
@@ -438,86 +926,176 @@ def maybe_viewer():
     if args.headless:
         yield None
     else:
-        with mujoco.viewer.launch_passive(model, data) as v:
+        with mujoco.viewer.launch_passive(model, data, key_callback=key_callback) as v:
             yield v
 
 
+print(
+    "\nControls (viewer window focused):\n"
+    "  W/S A/D Q/E   RL velocity commands (vx / vy / yaw)\n"
+    "  C             clear velocity command\n"
+    "  [ / ]         previous / next mimic skill (RL only; blocked while MIMIC runs)\n"
+    "  0-9           jump to mimic skill (RL only; blocked while MIMIC runs)\n"
+    "  L             return to RL locomotion\n"
+    "  Space         pause / resume\n"
+    "  R             reset current mode\n"
+    f"\nStart mode: {start_mode}\n"
+)
+
 with maybe_viewer() as viewer:
-    reset(0)
-    # settle: hold frame-0 with PD for 0.5 s
-    for _ in range(int(0.5 / model.opt.timestep)):
-        apply_pd(ref_joint_pos[0])
-        mujoco.mj_step(model, data)
+    if start_mode == "MIMIC":
+        if not enter_mimic(cur_policy_idx, hard_reset=True):
+            raise SystemExit("[ERROR] failed to start mimic")
+    else:
+        enter_rl(hard_reset=True)
+
+    if args.settle > 0.0:
+        q_hold = M["jp"][0] if mode["name"] == "MIMIC" else rl_stand_q
+        kp_hold = kp_j if mode["name"] == "MIMIC" else rl_kp_j
+        kd_hold = kd_j if mode["name"] == "MIMIC" else rl_kd_j
+        for _ in range(int(args.settle / model.opt.timestep)):
+            apply_pd(q_hold, kp_hold, kd_hold)
+            mujoco.mj_step(model, data)
 
     t = 0
     step = 0
     err_pos = []
     while True:
         if viewer is None:
-            if step >= T:
-                print(f"headless pass finished. mean anchor pos error: {np.mean(err_pos):.3f} m")
+            if mode["name"] == "MIMIC" and step >= T:
+                print(f"headless mimic finished. mean anchor pos error: {np.mean(err_pos):.3f} m")
+                break
+            if mode["name"] == "RL" and step >= 500:
+                print("headless RL smoke finished (500 steps)")
                 break
         elif not viewer.is_running():
             break
 
+        # ---- mode requests ----------------------------------------------------
+        if rl_request["flag"]:
+            enter_rl(hard_reset=False)
+            t = 0
+            err_pos.clear()
+            rl_request["flag"] = False
+
+        if switch_request["idx"] is not None:
+            idx = switch_request["idx"]
+            switch_request["idx"] = None
+            # Refuse a new mimic skill until the current one finishes (or user
+            # presses L to return to RL). Matches real-robot “one skill at a time”.
+            if mode["name"] == "MIMIC" and t < T:
+                print(
+                    f"[mimic] busy t={t}/{T} — finish current skill (or press L) "
+                    f"before switching to [{idx}]"
+                )
+            else:
+                # Enter from the live pose (RL). Never teleport — a real robot
+                # cannot snap to the motion's frame 0.
+                if enter_mimic(idx, hard_reset=False):
+                    t = 0
+                    err_pos.clear()
+
+        if reset_request["flag"]:
+            reset_request["flag"] = False
+            if mode["name"] == "RL":
+                enter_rl(hard_reset=True)
+            elif rt is not None:
+                reset_mimic(0)
+                last_action[:] = 0.0
+            t = 0
+            err_pos.clear()
+
         start = time.time()
 
-        # ---- observation ------------------------------------------------------
-        cmd = np.concatenate([ref_joint_pos[t], ref_joint_vel[t]])  # (58,)
-        p_anc = data.xpos[anchor_body_id].copy()
-        q_anc = data.xquat[anchor_body_id].copy()  # wxyz
-        R_anc = quat_to_mat(q_anc)
-        # mjlab: mat[..., :2].reshape -> first TWO COLUMNS
-        R_rel = R_anc.T @ quat_to_mat(ref_anchor_quat[t])
-        anchor_ori_b = R_rel[:, :2].reshape(-1)  # (6,)
-        # pelvis / free-joint rates (body frame ang vel already in qvel[3:6])
-        R_pelvis = quat_to_mat(data.qpos[free_adr + 3 : free_adr + 7])
-        base_ang_vel_b = data.qvel[3:6].copy()
-        joint_pos_rel = data.qpos[mj_qpos_adr] - default_q
-        joint_vel_rel = data.qvel[mj_dof_adr].copy()
+        if paused["flag"]:
+            if viewer is not None:
+                overlay(viewer)
+                if mode["name"] == "MIMIC" and not args.no_ghost:
+                    draw_ghost(viewer.user_scn, t)
+                viewer.sync()
+            time.sleep(0.02)
+            continue
 
-        parts = [cmd]
-        if args.with_state_estimation:
-            anchor_pos_b = R_anc.T @ (ref_anchor_pos[t] - p_anc)
-            base_lin_vel_b = R_pelvis.T @ data.qvel[0:3]
-            parts.extend([anchor_pos_b, anchor_ori_b, base_lin_vel_b, base_ang_vel_b])
+        base_quat = data.qpos[free_adr + 3 : free_adr + 7].copy()
+        ang_vel_b = data.qvel[3:6].copy()
+        q_mj = data.qpos[mj_qpos_adr].copy()
+        qd_mj = data.qvel[mj_dof_adr].copy()
+
+        if mode["name"] == "RL":
+            q_des = locomo.act(base_quat, ang_vel_b, q_mj, qd_mj)
+            for _ in range(decimation):
+                apply_pd(q_des, rl_kp_j, rl_kd_j)
+                mujoco.mj_step(model, data)
+            step += 1
+            cur_t[0] = step
         else:
-            parts.extend([anchor_ori_b, base_ang_vel_b])
-        parts.extend([joint_pos_rel, joint_vel_rel, last_action])
-        obs[:] = np.concatenate(parts).astype(np.float32)
+            # ---- mimic observation (mjlab PolicyCfg order) -------------------
+            # command(58) + motion_anchor_ori_b(6) [+ optional SE]
+            # + base_ang_vel(3) + joint_pos_rel(29) + joint_vel(29) + actions(29)
+            cmd = np.concatenate([M["jp"][t], M["jv"][t]])
+            p_anc = data.xpos[anchor_body_id].copy()
+            q_anc = data.xquat[anchor_body_id].copy()  # torso_link wxyz
+            # identical to mjlab: mat(quat_mul(quat_inv(q_robot), q_ref))[..., :2].reshape
+            anchor_ori_b = motion_anchor_ori_b(q_anc, ref_anchor_quat[t])
+            R_anc = quat_to_mat(q_anc)
+            R_pelvis = quat_to_mat(base_quat)
+            base_ang_vel_b = ang_vel_b  # free-joint qvel[3:6] already body-frame
+            joint_pos_rel = q_mj - default_q
+            joint_vel_rel = qd_mj
 
-        # ---- policy -----------------------------------------------------------
-        if args.replay:
-            action = ((ref_joint_pos[t] - default_q) / scale_j).astype(np.float32)
-        else:
-            action = np.asarray(policy(obs), dtype=np.float32).reshape(-1)
-            assert action.shape[0] == N, f"policy action dim {action.shape[0]} != {N}"
-        last_action = action
+            parts = [cmd]
+            if args.with_state_estimation:
+                # subtract_frame_transforms translation: R_robot^T @ (p_ref - p_robot)
+                anchor_pos_b = R_anc.T @ (ref_anchor_pos[t] - p_anc)
+                base_lin_vel_b = R_pelvis.T @ data.qvel[0:3]
+                parts.extend([anchor_pos_b, anchor_ori_b, base_lin_vel_b, base_ang_vel_b])
+            else:
+                parts.extend([anchor_ori_b, base_ang_vel_b])
+            parts.extend([joint_pos_rel, joint_vel_rel, last_action])
+            obs[:] = np.concatenate(parts).astype(np.float32)
 
-        q_des = default_q + scale_j * action
-        for _ in range(decimation):
-            apply_pd(q_des)
-            mujoco.mj_step(model, data)
+            if args.replay:
+                action = ((M["jp"][t] - default_q) / rt.scale).astype(np.float32)
+            else:
+                action = np.asarray(rt.run(obs, t), dtype=np.float32).reshape(-1)
+                assert action.shape[0] == N, f"policy action dim {action.shape[0]} != {N}"
+            last_action = action
 
-        err_pos.append(np.linalg.norm(data.xpos[anchor_body_id] - ref_anchor_pos[t]))
-        step += 1
-        t += 1
-        if t >= T:
-            if args.no_loop:
-                print(f"motion finished. mean anchor pos error: {np.mean(err_pos):.3f} m")
-                break
-            t = 0
+            q_des = default_q + rt.scale * action
+            for _ in range(decimation):
+                apply_pd(q_des)
+                mujoco.mj_step(model, data)
+
+            err_pos.append(np.linalg.norm(data.xpos[anchor_body_id] - ref_anchor_pos[t]))
+            step += 1
+            cur_t[0] = t
+            t += 1
+            if t >= T:
+                if args.loop_mimic:
+                    t = 0
+                else:
+                    # rl_sar: skill end -> RequestStateChange(Locomotion)
+                    enter_rl(hard_reset=False)
+                    t = 0
+                    err_pos.clear()
 
         if viewer is not None:
-            if not args.no_ghost:
-                draw_ghost(viewer.user_scn, t)
+            overlay(viewer)
+            if mode["name"] == "MIMIC" and not args.no_ghost:
+                draw_ghost(viewer.user_scn, min(t, T - 1))
+            else:
+                viewer.user_scn.ngeom = 0
             viewer.sync()
 
         if step % 10 == 0:
-            print(
-                f"step {step:4d} t={t:3d}  anchor err {err_pos[-1]:.3f} m  "
-                f"z_err {data.xpos[anchor_body_id, 2] - ref_anchor_pos[t, 2]:+.3f}"
-            )
+            if mode["name"] == "RL":
+                c = locomo.commands
+                print(f"step {step:4d}  [RL] cmd=({c[0]:+.2f},{c[1]:+.2f},{c[2]:+.2f})")
+            else:
+                print(
+                    f"step {step:4d} t={t:3d}  [MIMIC] anchor err {err_pos[-1]:.3f} m  "
+                    f"z_err {data.xpos[anchor_body_id, 2] - ref_anchor_pos[min(t, T - 1), 2]:+.3f}"
+                )
 
         remaining = frame_dt - (time.time() - start)
         if remaining > 0:
