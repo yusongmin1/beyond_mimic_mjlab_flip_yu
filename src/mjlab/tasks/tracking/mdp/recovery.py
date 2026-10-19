@@ -8,15 +8,12 @@ Ported and adapted from:
   fallen-state initialization from a pre-collected ``.pth`` pool
   (``robot_init_states_*.pth``, diverse pelvis orientations near the ground).
 
-Env grouping (re-rolled randomly on every episode reset):
-- 60% normal tracking envs (reference-state init, standard terminations).
-- 40% recovery envs (randomly re-sampled each reset, not fixed env ids),
-  of which:
-  - half are "fall-window" envs: they start from the motion reference but get
-    a delayed-termination recovery window after tracking failure (fall), so
-    the policy must get up;
-  - half are "fallen-init" envs: initialized lying on the ground from the
-    ``.pth`` pool, also with the recovery window (tolerant terminations).
+Env grouping (AMP_mjlab-style two groups, re-rolled on every episode reset):
+- 60% normal tracking envs (reference-state init, immediate terminations).
+- 40% fall-recovery envs (``recovery_env_ratio=0.4``; re-sampled each reset).
+  Within the recovery group, ``fallen_init_ratio`` (default 0.5) start lying
+  on the ground from the ``.pth`` pool; the rest start from the motion
+  reference and only enter the get-up window after tracking failure.
 """
 
 from __future__ import annotations
@@ -47,9 +44,9 @@ class RecoveryTerminationManager(TerminationManager):
   clears), the counter resets.
 
   The recovery set is NOT static: the mask is re-read from the motion
-  command every step (``recovery_mask_fn``), which re-rolls the normal /
-  fall-window / fallen-init split on every reset (40% recovery, 20/20 split
-  by default). Adapted from AMP_mjlab ``DelayedTerminationManager``.
+  command every step (``recovery_mask_fn``), which re-rolls the AMP-style
+  60% normal / 40% fall-recovery split on every reset. Adapted from
+  AMP_mjlab ``DelayedTerminationManager``.
   """
 
   def __init__(
@@ -115,11 +112,10 @@ def install_recovery_termination(
   """Startup event: wrap the termination manager with a recovery window.
 
   The recovery set is dynamic: the manager re-reads the command-side
-  ``is_recovery_env`` mask every step, and the command re-rolls the split
-  (normal / fall-window / fallen-init) on every reset. With
-  ``recovery_env_ratio=0.4`` and ``fallen_init_ratio=0.5`` this yields
-  60% normal / 20% fall-window / 20% fallen-init per reset, with the
-  membership re-sampled randomly each episode (no fixed env ids).
+  ``is_recovery_env`` mask every step, and the command re-rolls the
+  AMP-style two-group split on every reset. With
+  ``recovery_env_ratio=0.4`` this yields 60% normal / 40% fall-recovery
+  per reset (membership re-sampled each episode; no fixed env ids).
   """
   del env_ids  # Unused (startup).
   if not 0.0 <= recovery_env_ratio <= 1.0:

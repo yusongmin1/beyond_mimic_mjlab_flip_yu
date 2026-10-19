@@ -432,14 +432,14 @@ class MotionCommand(CommandTerm):
     self.metrics["sampling_top1_bin"][:] = 0.5  # No specific bin preference.
 
   def _roll_recovery_groups(self, env_ids: torch.Tensor) -> None:
-    """Split envs into normal / fall-window-recovery / fallen-init groups.
+    """Split envs into normal (60%) / fall-recovery (40%) groups.
 
-    Re-rolled randomly on every episode reset (no fixed env ids): with
-    ``recovery_env_ratio=0.4`` and ``fallen_init_ratio=0.5`` this yields
-    60% normal tracking, 20% fall-window recovery, 20% fallen-init per
-    reset, with membership re-sampled each episode. The termination
-    manager reads ``is_recovery_env`` every step so its recovery set
-    follows these re-rolls exactly.
+    AMP_mjlab-style two-group split (``delay_reset_env_ratio=0.4``),
+    re-rolled randomly on every episode reset (no fixed env ids). Within
+    the recovery group, ``fallen_init_ratio`` start from the fallen pool;
+    the rest start upright and only get the get-up window after a fall.
+    The termination manager reads ``is_recovery_env`` every step so its
+    recovery set follows these re-rolls exactly.
     """
     if self.cfg.recovery_env_ratio <= 0.0:
       self.is_recovery_env[env_ids] = False

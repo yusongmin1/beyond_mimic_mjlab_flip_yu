@@ -145,6 +145,40 @@ vs 地面的接触传感器，play 中实时打印接触 link 与法向力大小
 可选参数：`--hand-contact-bodies <regex>`（默认
 `(left|right)_wrist_(pitch|roll|yaw)_link`）、`--hand-contact-min-force <N>`。
 
+### MuJoCo Sim2Sim（RL 切换 mimic）
+
+在 MuJoCo 里回放 `logs/rsl_rl/g1_tracking/*/exported/policy.onnx`（自带嵌入
+motion）。默认先跑 RL 行走（`policies/g1_lab/policy_dwaq.pt`），viewer
+里用 `[` / `]` 或 `0-9` 切到 mimic；动作结束后自动回到 RL。
+
+先批量导出 ONNX（若还没有 `exported/policy.onnx`）：
+
+```bash
+conda activate env_isaaclab
+cd /path/to/mjlab-dev-go2-mimic
+python scripts/export_g1_tracking_onnx.py
+```
+
+常用命令：
+
+```bash
+# 列出全部可用 mimic 策略
+python scripts/sim2sim_g1_mujoco.py --list
+
+# 启动 RL；viewer 中热切换 mimic（推荐加 --match_isaac）
+python scripts/sim2sim_g1_mujoco.py --match_isaac
+python scripts/sim2sim_g1_mujoco.py --policy 88_05 --match_isaac
+
+# 直接从某个 mimic 开跑（结束后仍回 RL）
+python scripts/sim2sim_g1_mujoco.py --policy 88_05 --start_mimic --match_isaac
+
+# mimic 循环、不自动回 RL
+python scripts/sim2sim_g1_mujoco.py --policy long_01 --start_mimic --loop_mimic --match_isaac
+```
+
+`--policy` 可以是 `--list` 里的下标、run 名子串，或 ONNX/目录路径。
+更多参数见 `python scripts/sim2sim_g1_mujoco.py -h`。
+
 ### G1 Dance / Dance Fall-Recovery 任务
 
 基于 `tracking_env_cfg_dance.py` 的宽松锚点奖励配置（root_pos 1.0 /
@@ -274,11 +308,11 @@ Stage-II 从 Stage-I checkpoint resume（`--agent.load-run` 匹配
 
 ```bash
 python -m mjlab.scripts.train \
-  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation \
   --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
   --env.scene.num-envs 4096 \
   --agent.max-iterations 30000 \
-  --agent.run-name "dance1_subject2_fr_stage2" \
+  --agent.run-name "dance1_subject2_fall" \
   --agent.resume True \
   --agent.load-run ".*_dance1_subject2$"
 ```

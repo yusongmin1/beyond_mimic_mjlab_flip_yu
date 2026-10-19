@@ -9,11 +9,14 @@ __pycache__/
 MUJOCO_LOG.TXT
 debug.py
 .vscode/
+.venv/
+.pytest_cache/
+.kilo/
+.github/
 *.ipynb_checkpoints/
 # motions/
 *_rerun*
 artifacts/
-.venv/
 render_robots.py
 benchmark_results/
 

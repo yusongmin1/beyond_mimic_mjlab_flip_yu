@@ -84,18 +84,18 @@ def unitree_g1_flat_dance_env_cfg(
   config (tracking_env_cfg_dance.py) with its relaxed anchor rewards.
 
   Args:
-    enable_fall_recovery: Split envs into normal / recovery groups.
-      recovery_env_ratio of envs get a get-up window after falling
-      (delayed termination + tolerant tracking termination); within that
-      group fallen_init_ratio start lying on the ground from a
-      pre-collected pool (KungFuAthleteBot robot_init_states format).
-      The split is re-rolled randomly on every reset (dynamic, not fixed
-      env ids).
-    recovery_env_ratio: Fraction of envs in the recovery group (0.4 => 40%,
-      re-sampled each reset).
+    enable_fall_recovery: AMP_mjlab-style two-group split — 60% normal /
+      40% fall-recovery (``recovery_env_ratio``). Recovery envs get a
+      get-up window after falling (delayed termination + tolerant tracking
+      termination). Within the recovery group, ``fallen_init_ratio`` start
+      lying on the ground from a pre-collected pool (KungFuAthleteBot
+      robot_init_states format). The split is re-rolled randomly on every
+      reset (dynamic, not fixed env ids).
+    recovery_env_ratio: Fraction of envs in the fall-recovery group
+      (0.4 => 40% recovery / 60% normal, re-sampled each reset).
     fallen_init_ratio: Fraction of the recovery group that is initialized
-      fallen (0.5 => half of the recovery envs; the rest fall during the
-      episode and get the window).
+      fallen (0.5 => half of the 40% recovery envs; the rest fall during
+      the episode and get the window).
     max_recovery_steps: Recovery window length in env steps (second stage).
     bad_tracking_time_threshold_s: Tolerant-termination window for
       recovery envs (seconds of continuous bad tracking). Together with
@@ -405,7 +405,9 @@ def _apply_g1_overrides(
 
     # 3) Startup: wrap the termination manager with the recovery window.
     #    The recovery set is dynamic (re-rolled on every reset via the
-    #    command-side mask): 60% normal / 20% fall-window / 20% fallen-init.
+    #    command-side mask): 60% normal / 40% fall-recovery (AMP_mjlab
+    #    delay_reset_env_ratio=0.4). Within recovery, fallen_init_ratio
+    #    start from the fallen pool.
     cfg.events["install_recovery_termination"] = EventTermCfg(
       func=mdp.install_recovery_termination,
       mode="startup",
@@ -447,12 +449,17 @@ def _apply_g1_overrides(
         },
       )
 
-    # 5) Stand-up reward shaping (KungFuAthleteBot penalties):
+    # 5) Stand-up reward shaping (AMP_mjlab mask_delay style): only active
+    #    on fall-recovery envs that are currently fallen / getting up
+    #    (is_recovery_env & (recovery_counters > 0 | bad_tracking > 0)).
+    #    Normal envs and upright recovery envs get 0.
     #    - penalty_relative_root_orientation (-0.5): pelvis orientation
     #      error w.r.t. the reference — encourages rolling the pelvis
     #      upright first instead of tumbling around.
-    #    - penalty_xy_rate_before_stand (-1.0): stand-up-gated horizontal
-    #      drift penalty — get up in place instead of scooting away.
+    #    - penalty_xy_rate_before_stand (-1.0): horizontal drift penalty —
+    #      get up in place instead of scooting away.
+    #    - reward_reference_height_before_stand (2.5): pelvis height
+    #      matching the reference while down (AMP track_root_height).
     cfg.rewards["penalty_relative_root_orientation"] = RewardTermCfg(
       func=mdp.penalty_relative_root_orientation,
       weight=-0.5,
@@ -463,9 +470,6 @@ def _apply_g1_overrides(
       weight=-1.0,
       params={"command_name": "motion", "stand_threshold": 0.1},
     )
-    #    - reward_reference_height_before_stand (2.5): stand-up-gated
-    #      reward for the pelvis height matching the reference — pulls the
-    #      robot up toward the reference posture while it is still down.
     cfg.rewards["reward_reference_height_before_stand"] = RewardTermCfg(
       func=mdp.reward_reference_height_before_stand,
       weight=2.5,
