@@ -72,10 +72,10 @@ def unitree_g1_flat_dance_env_cfg(
   enable_actuator_delay: bool = True,
   enable_fall_recovery: bool = False,
   recovery_env_ratio: float = 0.4,
-  fallen_init_ratio: float = 0.5,
+  fallen_init_ratio: float = 1.0,
   max_recovery_steps: int = 100,
   bad_tracking_time_threshold_s: float = 2.0,
-  recovery_assist_initial_force: float = 250.0,
+  recovery_assist_initial_force: float = 500.0,
   fall_recovery_stage: int = 1,
 ) -> ManagerBasedRlEnvCfg:
   """Create Unitree G1 dance tracking configuration.
@@ -87,26 +87,29 @@ def unitree_g1_flat_dance_env_cfg(
     enable_fall_recovery: AMP_mjlab-style two-group split — 60% normal /
       40% fall-recovery (``recovery_env_ratio``). Recovery envs get a
       get-up window after falling (delayed termination + tolerant tracking
-      termination). Within the recovery group, ``fallen_init_ratio`` start
-      lying on the ground from a pre-collected pool (KungFuAthleteBot
-      robot_init_states format). The split is re-rolled randomly on every
-      reset (dynamic, not fixed env ids).
+      termination). By default the entire recovery group
+      (``fallen_init_ratio=1.0``) starts lying on the ground from a
+      pre-collected pool (KungFuAthleteBot robot_init_states format).
+      The split is re-rolled randomly on every reset (dynamic, not fixed
+      env ids).
     recovery_env_ratio: Fraction of envs in the fall-recovery group
       (0.4 => 40% recovery / 60% normal, re-sampled each reset).
     fallen_init_ratio: Fraction of the recovery group that is initialized
-      fallen (0.5 => half of the 40% recovery envs; the rest fall during
-      the episode and get the window).
-    max_recovery_steps: Recovery window length in env steps (second stage).
+      fallen (1.0 => all 40% recovery envs start from the fallen pool).
+    max_recovery_steps: Delayed get-up window after TolerantTermination
+      fires (default 100 ≈ 2 s at step_dt=0.02). Total time down before
+      ``penalty_recovery_window_timeout`` (-200) is
+      bad_tracking_time_threshold_s + max_recovery_steps * step_dt
+      (= 4 s with defaults: 2 s tolerant + 2 s delay ≈ 200 env steps).
     bad_tracking_time_threshold_s: Tolerant-termination window for
       recovery envs (seconds of continuous bad tracking). Together with
-      max_recovery_steps the total get-up window is
-      bad_tracking_time_threshold_s + max_recovery_steps * step_dt
-      (default 2s + 2s = 4s).
+      max_recovery_steps the total get-up budget is 4 s by default.
     recovery_assist_initial_force: Initial upward assist force (N) on the
       torso while a recovery env is down; decays to 0 over training.
-    fall_recovery_stage: Stage-I uses the loose z thresholds
-      (anchor/ee z 0.5 m, KungFu Stage-I style); Stage-II uses the strict
-      ones (0.25 m). Both stages share the tolerant + delayed windows.
+    fall_recovery_stage: Both stages use anchor z 0.25 m. Stage-I uses
+      baseline push/RSI; Stage-II adds KungFu Stage-III-style stronger
+      push + larger RSI pose/velocity (``VELOCITY_RANGE_ADD``). Both
+      share tolerant + delayed windows.
   """
   cfg = make_dance_env_cfg()
   return _apply_g1_overrides(
@@ -192,7 +195,7 @@ def _apply_g1_overrides(
   enable_actuator_delay: bool,
   enable_fall_recovery: bool = False,
   recovery_env_ratio: float = 0.5,
-  fallen_init_ratio: float = 0.5,
+  fallen_init_ratio: float = 1.0,
   max_recovery_steps: int = 100,
   bad_tracking_time_threshold_s: float = 2.0,
   recovery_assist_initial_force: float = 250.0,
@@ -368,9 +371,9 @@ def _apply_g1_overrides(
     # 2) Termination: replace immediate tracking terminations with a
     #    tolerant version — normal envs terminate instantly; recovery envs
     #    get a continuous-bad-tracking window before the reset is released.
-    #    Stage-I uses loose z thresholds (KungFu Stage-I style, 0.5 m);
-    #    Stage-II tightens them to 0.25 m.
-    z_threshold = 0.5 if fall_recovery_stage == 1 else 0.25
+    #    Both stages use z 0.25 m (0.5 m is too loose to train well).
+    #    Stage-II difference is stronger push / RSI (below), not z.
+    z_threshold = 0.25
     cfg.terminations["tracking_failure"] = TerminationTermCfg(
       func=mdp.TolerantTermination(
         bad_tracking_time_threshold_s=bad_tracking_time_threshold_s,
@@ -385,16 +388,6 @@ def _apply_g1_overrides(
             "command_name": "motion",
             "threshold": 0.8,
           }),
-          ("ee_body_pos_z", mdp.bad_motion_body_pos_z_only, {
-            "command_name": "motion",
-            "threshold": z_threshold,
-            "body_names": (
-              "left_ankle_roll_link",
-              "right_ankle_roll_link",
-              "left_wrist_yaw_link",
-              "right_wrist_yaw_link",
-            ),
-          }),
         ],
       ),
       params={},
@@ -403,11 +396,27 @@ def _apply_g1_overrides(
     cfg.terminations.pop("anchor_ori", None)
     cfg.terminations.pop("ee_body_pos", None)
 
+    # 2b) Stage-II: KungFu Stage-III-style stronger disturbance (train only).
+    #     Larger RSI pose/velocity + VELOCITY_RANGE_ADD push. Play clears
+    #     these later in the play overrides below.
+    if fall_recovery_stage >= 2 and not play:
+      motion_cmd.pose_range = {
+        "x": (-0.15, 0.15),
+        "y": (-0.15, 0.15),
+        "z": (-0.15, 0.15),
+        "roll": (-0.1, 0.1),
+        "pitch": (-0.1, 0.1),
+        "yaw": (-0.2, 0.2),
+      }
+      motion_cmd.velocity_range = VELOCITY_RANGE_ADD
+      if "push_robot" in cfg.events:
+        cfg.events["push_robot"].params["velocity_range"] = VELOCITY_RANGE_ADD
+
     # 3) Startup: wrap the termination manager with the recovery window.
     #    The recovery set is dynamic (re-rolled on every reset via the
     #    command-side mask): 60% normal / 40% fall-recovery (AMP_mjlab
-    #    delay_reset_env_ratio=0.4). Within recovery, fallen_init_ratio
-    #    start from the fallen pool.
+    #    delay_reset_env_ratio=0.4). With fallen_init_ratio=1.0 the whole
+    #    40% starts from the fallen pool.
     cfg.events["install_recovery_termination"] = EventTermCfg(
       func=mdp.install_recovery_termination,
       mode="startup",
@@ -419,31 +428,47 @@ def _apply_g1_overrides(
     )
 
     # 4) Interval-every-step: upward assist force on the torso while a
-    #    recovery env is down (AMP_mjlab recovery_assist_force), decaying
-    #    linearly with the training iteration and fully withdrawn at 0.
+    #    recovery env is down (AMP_mjlab recovery_assist_force). Training
+    #    decays it via curriculum; play freezes force to the checkpoint
+    #    iteration on the same schedule (apply_prob=0.8) with force arrows.
+    cfg.events["recovery_assist_force"] = EventTermCfg(
+      func=mdp.apply_recovery_assist_force,
+      mode="interval",
+      interval_range_s=(0.02, 0.02),  # == step_dt (decimation 4 @ 200Hz).
+      params={
+        "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",)),
+        # Fire on the first delayed-recovery step (counter==1), i.e. right
+        # when TolerantTermination announces failure — not at window midpoint.
+        # Waiting until max_recovery_steps//2 leaves too little time to stand.
+        "trigger_recovery_steps": 1,
+        "apply_prob": 0.8,
+        "initial_force": recovery_assist_initial_force,
+        "duration_steps": 25,
+      },
+    )
+    # action_rate_l2: curriculum for fall-recovery only (start mild, tighten).
+    # Initial -0.025; every 500 PPO iters subtract 0.005; floor at -0.1.
+    cfg.rewards["action_rate_l2"].weight = -0.025
     if not play:
-      cfg.events["recovery_assist_force"] = EventTermCfg(
-        func=mdp.apply_recovery_assist_force,
-        mode="interval",
-        interval_range_s=(0.02, 0.02),  # == step_dt (decimation 4 @ 200Hz).
-        params={
-          "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",)),
-          # Fire on the first delayed-recovery step (counter==1), i.e. right
-          # when TolerantTermination announces failure — not at window midpoint.
-          # Waiting until max_recovery_steps//2 leaves too little time to stand.
-          "trigger_recovery_steps": 1,
-          "apply_prob": 0.8,
-          "initial_force": recovery_assist_initial_force,
-          "duration_steps": 25,
-        },
-      )
       # AMP_mjlab-style curriculum term: decays the event's force and logs
       # Curriculum/recovery_assist_force into the per-iteration block.
       cfg.curriculum["recovery_assist_force"] = CurriculumTermCfg(
         func=mdp.recovery_assist_force,
         params={
+          "event_name": "recovery_assist_force",
           "initial_force": recovery_assist_initial_force,
           "force_decay": 20.0,
+          "decay_interval_iters": 500,
+          "steps_per_iter": 24,
+        },
+      )
+      cfg.curriculum["action_rate_l2"] = CurriculumTermCfg(
+        func=mdp.action_rate_l2_weight,
+        params={
+          "reward_name": "action_rate_l2",
+          "initial_weight": -0.025,
+          "weight_decay": 0.005,
+          "min_weight": -0.1,
           "decay_interval_iters": 500,
           "steps_per_iter": 24,
         },
@@ -460,6 +485,10 @@ def _apply_g1_overrides(
     #      get up in place instead of scooting away.
     #    - reward_reference_height_before_stand (2.5): pelvis height
     #      matching the reference while down (AMP track_root_height).
+    #    - penalty_recovery_window_timeout (-200): single-step penalty when
+    #      a recovery env stays down for the full ~4 s get-up budget
+    #      (2 s tolerant + 100-step delay); successful get-up / normal
+    #      envs get 0.
     cfg.rewards["penalty_relative_root_orientation"] = RewardTermCfg(
       func=mdp.penalty_relative_root_orientation,
       weight=-0.5,
@@ -474,6 +503,10 @@ def _apply_g1_overrides(
       func=mdp.reward_reference_height_before_stand,
       weight=2.5,
       params={"command_name": "motion", "stand_threshold": 0.1, "std": 0.25},
+    )
+    cfg.rewards["penalty_recovery_window_timeout"] = RewardTermCfg(
+      func=mdp.penalty_recovery_window_timeout,
+      weight=-200.0,
     )
 
   cfg.viewer.body_name = "torso_link"
@@ -493,8 +526,10 @@ def _apply_g1_overrides(
 
   # Apply play mode overrides.
   if play:
-    # Effectively infinite episode length.
-    cfg.episode_length_s = int(1e9)
+    # Fall-recovery play keeps training episode length (10 s) so rounds match
+    # train; other tracking play tasks keep the long interactive horizon.
+    if not enable_fall_recovery:
+      cfg.episode_length_s = int(1e9)
 
     cfg.observations["actor"].enable_corruption = False
     cfg.events.pop("push_robot", None)
@@ -508,7 +543,11 @@ def _apply_g1_overrides(
 
     # Play: no fallen-init envs (grading normal tracking from motion start);
     # keep the tolerant termination so manual knock-downs can recover.
+    # Assist force is frozen in play.py to the checkpoint-iteration value
+    # (same curriculum schedule as training); drop live curriculum updates.
     if enable_fall_recovery:
       motion_cmd.fallen_init_ratio = 0.0
+      cfg.curriculum.pop("recovery_assist_force", None)
+      cfg.curriculum.pop("action_rate_l2", None)
 
   return cfg

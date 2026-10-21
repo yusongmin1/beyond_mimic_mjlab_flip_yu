@@ -202,6 +202,20 @@ def _apply_recovery_fallen_only(
   return torch.where(mask, value, torch.zeros_like(value))
 
 
+def penalty_recovery_window_timeout(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """1.0 on the frame a recovery env exhausts the get-up budget (~4 s).
+
+  Fires when the delayed-recovery window ends without standing (defaults:
+  2 s TolerantTermination + 100 delay steps ≈ 200 env steps / 4 s total).
+  Successful get-ups and normal envs always return 0. Pair with weight
+  -200 (AMP ``is_terminated`` style).
+  """
+  flag = getattr(env.termination_manager, "_recovery_window_expired", None)
+  if not isinstance(flag, torch.Tensor):
+    return torch.zeros(env.num_envs, device=env.device)
+  return flag.float()
+
+
 def penalty_relative_root_orientation(
   env: ManagerBasedRlEnv,
   command_name: str,

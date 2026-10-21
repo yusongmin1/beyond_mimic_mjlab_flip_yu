@@ -266,13 +266,27 @@ class MotionModelIdentity(MotionModel):
 
 def main() -> None:
     force = "--force" in sys.argv
-    runs = sorted(d for d in glob.glob(os.path.join(TRACKING_DIR, "*/")) if os.path.isdir(d))
-    print(f"found {len(runs)} runs in {TRACKING_DIR}")
-    for run_dir in runs:
-        try:
-            print(export_run(run_dir, force), flush=True)
-        except Exception as e:
-            print(f"[fail] {os.path.basename(os.path.normpath(run_dir))}: {e}", flush=True)
+    # Optional positional log dirs (default: g1_tracking). Example:
+    #   python scripts/export_g1_tracking_onnx.py logs/rsl_rl/g1_fall_recovery
+    #   python scripts/export_g1_tracking_onnx.py --force logs/rsl_rl/g1_fall_recovery
+    dirs = [
+        os.path.abspath(a)
+        for a in sys.argv[1:]
+        if a != "--force" and not a.startswith("-")
+    ]
+    if not dirs:
+        dirs = [TRACKING_DIR]
+    for tracking_dir in dirs:
+        runs = sorted(d for d in glob.glob(os.path.join(tracking_dir, "*/")) if os.path.isdir(d))
+        print(f"found {len(runs)} runs in {tracking_dir}")
+        for run_dir in runs:
+            try:
+                print(export_run(run_dir, force), flush=True)
+            except Exception as e:
+                print(
+                    f"[fail] {os.path.basename(os.path.normpath(run_dir))}: {e}",
+                    flush=True,
+                )
 
 
 if __name__ == "__main__":

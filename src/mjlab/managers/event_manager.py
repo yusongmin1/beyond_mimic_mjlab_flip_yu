@@ -14,6 +14,7 @@ from mjlab.managers.manager_base import ManagerBase, ManagerTermBaseCfg
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
+  from mjlab.viewer.debug_visualizer import DebugVisualizer
 
 F = Callable[..., None]
 
@@ -167,7 +168,9 @@ class EventManager(ManagerBase):
     else:
       num_envs = len(env_ids)
     if "interval" in self._mode_term_cfgs:
-      for index, term_cfg in enumerate(self._mode_class_term_cfgs["interval"]):
+      # Index into ``_interval_term_time_left`` matches ALL interval terms
+      # (not only class-based ones).
+      for index, term_cfg in enumerate(self._mode_term_cfgs["interval"]):
         if not term_cfg.is_global_time:
           assert term_cfg.interval_range_s is not None
           lower, upper = term_cfg.interval_range_s
@@ -250,6 +253,13 @@ class EventManager(ManagerBase):
             term_cfg.func(self._env, valid_env_ids, **term_cfg.params)
       else:
         term_cfg.func(self._env, env_ids, **term_cfg.params)
+
+  def debug_vis(self, visualizer: "DebugVisualizer") -> None:
+    """Delegate debug visualization to class-based event terms."""
+    for mode_cfgs in self._mode_class_term_cfgs.values():
+      for term_cfg in mode_cfgs:
+        if hasattr(term_cfg.func, "debug_vis"):
+          term_cfg.func.debug_vis(visualizer)
 
   def _prepare_terms(self) -> None:
     self._interval_term_time_left: list[torch.Tensor] = list()

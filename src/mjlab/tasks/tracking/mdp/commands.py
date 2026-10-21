@@ -436,8 +436,9 @@ class MotionCommand(CommandTerm):
 
     AMP_mjlab-style two-group split (``delay_reset_env_ratio=0.4``),
     re-rolled randomly on every episode reset (no fixed env ids). Within
-    the recovery group, ``fallen_init_ratio`` start from the fallen pool;
-    the rest start upright and only get the get-up window after a fall.
+    the recovery group, ``fallen_init_ratio`` (default 1.0) start from the
+    fallen pool; any remainder start upright and only get the get-up
+    window after a fall.
     The termination manager reads ``is_recovery_env`` every step so its
     recovery set follows these re-rolls exactly.
     """
@@ -448,7 +449,7 @@ class MotionCommand(CommandTerm):
 
     n = env_ids.numel()
     rec = torch.rand(n, device=self.device) < self.cfg.recovery_env_ratio
-    # Among recovery envs, fallen-init share (default: half of the 40%).
+    # Among recovery envs, fallen-init share (default 1.0 => all 40%).
     fallen = rec & (
       torch.rand(n, device=self.device) < self.cfg.fallen_init_ratio
     )

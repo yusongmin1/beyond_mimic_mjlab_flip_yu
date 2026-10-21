@@ -1,6 +1,7 @@
 """Script to play RL agent with RSL-RL."""
 
 import os
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -15,10 +16,19 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
+from mjlab.tasks.tracking.mdp.recovery import set_recovery_assist_force_for_iteration
 from mjlab.utils.os import get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
+
+
+def _checkpoint_iteration(path: Path | None) -> int | None:
+  """Parse PPO iteration from ``model_<iter>.pt`` checkpoint names."""
+  if path is None:
+    return None
+  match = re.search(r"model_(\d+)", path.stem)
+  return int(match.group(1)) if match else None
 
 # Hand-region bodies for contact printing (G1 wrist links; the rubber hand
 # collision geoms were removed, wrist capsules are the remaining colliders).
@@ -143,10 +153,24 @@ def run_play(task_id: str, cfg: PlayConfig):
   env_cfg = load_env_cfg(task_id, play=not cfg.keep_randomization)
   agent_cfg = load_rl_cfg(task_id)
 
+  has_recovery_assist = "recovery_assist_force" in env_cfg.events
   if cfg.keep_randomization:
-    # Keep training-time DR, but allow long interactive sessions.
-    env_cfg.episode_length_s = int(1e9)
+    # Keep training-time DR. Fall-recovery keeps train episode length (10 s);
+    # other tasks still get a long interactive horizon.
+    if not has_recovery_assist:
+      env_cfg.episode_length_s = int(1e9)
+    # Drop live curricula; assist force is frozen to the checkpoint iteration
+    # after the env is built (same schedule as training).
+    if "recovery_assist_force" in env_cfg.curriculum:
+      env_cfg.curriculum.pop("recovery_assist_force")
+    if "action_rate_l2" in env_cfg.curriculum:
+      env_cfg.curriculum.pop("action_rate_l2")
     print("[INFO]: Domain randomization kept enabled")
+    if has_recovery_assist:
+      print(
+        f"[INFO]: Fall-recovery play episode_length_s={env_cfg.episode_length_s} "
+        "(same as training)"
+      )
 
   # Resolve num_envs: keep_randomization defaults to 50 so DR is visible.
   num_envs = cfg.num_envs
@@ -315,6 +339,18 @@ def run_play(task_id: str, cfg: PlayConfig):
     f"[INFO]: Playing with {env.num_envs} env(s); "
     "viewer overlay should show Env 1/N (zoom out if robots look stacked)."
   )
+
+  # Fall-recovery: freeze assist force to the value used at this checkpoint's
+  # PPO iteration (same decay schedule as training), not the initial force.
+  if has_recovery_assist:
+    ckpt_iter = _checkpoint_iteration(resume_path)
+    if ckpt_iter is None:
+      print(
+        "[WARN]: Could not parse checkpoint iteration; "
+        "recovery assist stays at initial_force."
+      )
+    else:
+      set_recovery_assist_force_for_iteration(env, ckpt_iter)
 
   if TRAINED_MODE and cfg.video:
     print("[INFO] Recording videos during play")

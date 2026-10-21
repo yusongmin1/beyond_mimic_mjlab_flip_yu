@@ -133,12 +133,10 @@ register_mjlab_task(
 # Notes:
 # - Plain Dance tasks use tracking_env_cfg_dance.py (relaxed anchors) without
 #   fall-recovery machinery; logs go to logs/rsl_rl/g1_dance/.
-# - Fall-recovery design: 50% normal envs; of the other 50% recovery envs,
-#   half fall mid-episode and get a get-up window (delayed termination +
-#   upward assist force, AMP_mjlab style), half initialize lying on the
-#   ground from a pre-collected diverse fallen-state pool (KungFuAthleteBot
-#   style).
-# - Fall-Recovery Stage-I: TolerantTermination z thresholds 0.5 m (loose,
-#   KungFu Stage-I style); Stage-II: 0.25 m (strict). Windows (2s tolerant
-#   + 2s delayed) shared by both stages.
+# - Fall-recovery design: 60% normal / 40% recovery (recovery_env_ratio=0.4);
+#   with fallen_init_ratio=1.0 the whole recovery group starts from the
+#   fallen-state pool (delayed termination + upward assist, AMP style).
+# - Fall-Recovery: both stages use z 0.25 m. Stage-I baseline push/RSI;
+#   Stage-II adds KungFu Stage-III-style VELOCITY_RANGE_ADD push and
+#   larger RSI pose/velocity. Windows (2s tolerant + 2s delayed) shared.
 # - Fall-Recovery logs go to logs/rsl_rl/g1_fall_recovery/.

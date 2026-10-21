@@ -190,9 +190,9 @@ root_ori 0.5），执行器已启用梯形力矩-速度包络（见下节）。�
 | `Mjlab-Tracking-Flat-Unitree-G1-Dance` | 纯舞蹈跟踪 | `logs/rsl_rl/g1_dance/` |
 | `Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation` | 纯舞蹈，无状态估计（Stage-I） | 同上 |
 | `Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation-Stage-II` | Stage-II：更严终止 + 更大推力 | 同上 |
-| `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery` | 舞蹈 + 倒地恢复（Stage-I，z 0.5） | `logs/rsl_rl/g1_fall_recovery/` |
+| `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery` | 舞蹈 + 倒地恢复（Stage-I，z 0.25） | `logs/rsl_rl/g1_fall_recovery/` |
 | `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation` | 同上，无状态估计（Stage-I） | 同上 |
-| `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II` | 倒地恢复 Stage-II（z 0.25） | 同上 |
+| `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II` | 倒地恢复 Stage-II（z 0.25 + KungFu III 级推扰/RSI） | 同上 |
 
 纯 Dance 训练示例：
 
@@ -272,60 +272,58 @@ python -m mjlab.scripts.play \
 去掉 `--keep-randomization` 则为干净环境回放（无推扰、无 RSI 噪声、
 无终止）。
 
-#### Fall-Recovery 环境分组（60% / 20% / 20%，每次 reset 随机重抽）
+#### Fall-Recovery 环境分组（60% / 40%，每次 reset 随机重抽）
 
-#### 环境分组（60% / 20% / 20%，动态随机抽取）
+默认 `recovery_env_ratio=0.4`、`fallen_init_ratio=1.0`，即 **两组**（不是
+60/20/20）：
 
 | 组 | 比例 | 行为 |
 | :--- | :--- | :--- |
-| 正常跟踪 | 60% | 标准 BeyondMimic 式跟踪，摔倒即终止 |
-| 倒地窗口组 | 20% | 正常起步，摔倒后获得起身窗口（AMP_mjlab 式延迟终止 + torso 向上助力） |
-| 躺倒初始化组 | 20% | reset 时直接从预采集的多样躺倒状态池初始化（KungFuAthleteBot 式 `.pth` 池） |
+| 正常跟踪 | **60%** | 标准跟踪；摔倒即终止（无起身窗口） |
+| 倒地恢复组 | **40%** | reset 时从预采集躺倒状态池初始化（KungFuAthleteBot 式 `.pth`）；带 AMP 式延迟终止 + torso 向上助力 |
 
-分组**不再固定 env id**：每次 episode reset 时按比例随机重抽每个 env 的
-组别（`MotionCommand._roll_recovery_groups`），终止管理器每步读取命令侧
-`is_recovery_env` 掩码（`RecoveryTerminationManager`），因此延迟终止窗口
-与助力课程始终与当次抽取结果同步。
+若把 `fallen_init_ratio` 降到 `<1`（例如 0.5），恢复组内部才会再拆成
+「躺倒初始化」与「正常起步、摔倒后再开起身窗口」两部分
+（此时才可能出现类似 60% / 20% / 20% 的三组）。
 
-#### 两阶段（Stage-I / Stage-II）
+分组**不固定 env id**：每次 episode reset 按比例重抽
+（`MotionCommand._roll_recovery_groups`）；终止管理器每步读
+`is_recovery_env`（`RecoveryTerminationManager`），延迟窗口与助力与当次
+抽取同步。
 
-两阶段共享环境分组、容忍 + 延迟窗口（2 s + 2 s）、助力课程与爬起奖励；
-**唯一差别是 TolerantTermination 的两个 z 阈值**（KungFu Stage-I 风格课程）：
+#### 两阶段（Stage-I / Stage-II）与 KungFu 对比
 
-| 终止子条件 | Stage-I | Stage-II |
+两阶段共享：环境分组、容忍 + 延迟窗口（2 s + 2 s）、拉力课程、爬起奖励、
+`anchor_ori` 阈值 0.8。相对 KungFuAthleteBot 的三阶段（`1307-Stage-I/II/III`）：
+
+| | KungFu Stage-I | KungFu Stage-II | KungFu Stage-III | 本仓库 Stage-I | 本仓库 Stage-II |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 目标 | 粗跟踪 + 爬起 | 提跟踪精度 | 提鲁棒、少摔 | 粗跟踪 + 爬起 | 加大扰动、提鲁棒 |
+| 终止 z | `anchor`/`ee` **0.5** | 去掉 z-only | 同 II | `anchor_pos_z` **0.25** | **0.25**（同 I） |
+| 其他终止 | `ori` 0.8 | `ori` 0.6；全空间 `pos` 1.0；`hip_dof` π/6 | 同 II | `ori` 0.8 | `ori` 0.8（不变） |
+| 奖励 | 爬起塑形 | + CoM | 同 II | 爬起塑形 | 同 I |
+| 扰动 | 普通 push / RSI | 同 I | **加大** push / reset | 普通 push / RSI | **加大**（对齐 KungFu III） |
+| 宽容窗口 | 4 s | 4 s | 4 s | 2 s + 2 s 延迟 | 同 I |
+| 拉力课程 | 无 | 无 | 无 | **500 N** 起，每 500 iter −20 N，至 0 | 同 I |
+
+本仓库 Stage-II 相对 Stage-I 的具体差分（z 两阶段同为 0.25，否则难训）：
+
+| 项 | Stage-I | Stage-II |
 | :--- | :--- | :--- |
-| `anchor_pos_z`（锚点高度偏差） | **> 0.5 m** | > 0.25 m |
-| `ee_body_pos_z`（腕/踝高度偏差） | **> 0.5 m** | > 0.25 m |
-| `anchor_ori`（姿态） | > 0.8 | > 0.8（不变） |
-
-| 任务 ID | 阶段 |
-| :--- | :--- |
-| `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery(-No-State-Estimation)` | Stage-I（z 0.5） |
-| `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II` | Stage-II（z 0.25） |
-
-Stage-II 从 Stage-I checkpoint resume（`--agent.load-run` 匹配
-`logs/rsl_rl/g1_fall_recovery/` 下的 Stage-I run）：
-
-```bash
-python -m mjlab.scripts.train \
-  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation \
-  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
-  --env.scene.num-envs 4096 \
-  --agent.max-iterations 30000 \
-  --agent.run-name "dance1_subject2_fall" \
-  --agent.resume True \
-  --agent.load-run ".*_dance1_subject2$"
-```
+| `anchor_pos_z` | > **0.25 m** | > **0.25 m**（同 I） |
+| `anchor_ori` | > 0.8 | > 0.8（不变） |
+| RSI `pose_range` xyz | ±0.05 / ±0.05 / ±0.01 | **±0.15 / ±0.15 / ±0.15**（KungFu III） |
+| RSI / push 速度 | `VELOCITY_RANGE` | **`VELOCITY_RANGE_ADD`**（KungFu III） |
+| 任务 ID（无状态估计） | `...Fall-Recovery-No-State-Estimation` | `...Fall-Recovery-No-State-Estimation-Stage-II` |
 
 关键参数（`config/g1/env_cfgs.py` 中 `enable_fall_recovery=True` 分支）：
 
-- `recovery_env_ratio=0.4`：恢复组总占比 **40%**（每次 reset 随机重抽，非固定 env）；
-- `fallen_init_ratio=0.5`：恢复组中躺倒初始化的比例（40% × 50% = 20% 窗口组 / 20% 躺倒组）；
+- `recovery_env_ratio=0.4`：恢复组总占比 **40%**（每次 reset 随机重抽）；
+- `fallen_init_ratio=1.0`（默认）：恢复组全部从躺倒池起步（可改）；
 - `bad_tracking_time_threshold_s=2.0` + `max_recovery_steps=100`（@50Hz）：
-  容忍终止 2 s + 延迟窗口 2 s，**总起身窗口 4 s**；
-- `recovery_assist_initial_force=250 N`：torso 向上助力，在 Layer1 宣布失败后
-  **立即**施加（`trigger_recovery_steps=1`，不再等窗口中点），持续 0.5 s，
-  随训练迭代每 500 iter 衰减 20 N，至 0 撤出（课程式退火）；
+  容忍 2 s + 延迟 2 s，**总起身窗口 4 s**；
+- 拉力课程 `recovery_assist_initial_force=500 N`：torso 向上拉力，失败后立即施加
+  （`trigger_recovery_steps=1`），持续 0.5 s；每 500 iter 衰减 20 N，直至 0；
 - 躺倒池：`src/mjlab/tasks/tracking/assets/robot_init_states_g1_8192.pth`。
 
 #### 爬起奖励塑形（仅倒地状态激活，KungFuAthleteBot 风格门控）
@@ -349,39 +347,79 @@ Fall-Recovery 任务日志独立保存到 **`logs/rsl_rl/g1_fall_recovery/`**
 （不复用 `g1_tracking/`），由 `rl_cfg.py` 的
 `unitree_g1_fall_recovery_ppo_runner_cfg()` 定义，PPO 超参与跟踪任务完全一致。
 
-#### 训练 / 续训 / 播放
+#### 训练 / 续训 / 播放（无状态估计）
+
+以下命令均使用 **No-State-Estimation** 任务，可直接复制。先：
 
 ```bash
 conda activate env_isaaclab
 cd /home/zju/Downloads/mjlab-dev-go2-mimic
-PYTHONPATH=src python src/mjlab/scripts/train.py \
-  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation \
-  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
-  --env.scene.num-envs 4096 \
-  --agent.max-iterations 10000 \
-  --agent.run-name "dance1_subject2"
 ```
 
-**Resume（断点续训）**：参数含义同 G1 跟踪任务，但 run 目录匹配的是
-`logs/rsl_rl/g1_fall_recovery/`（省略时自动取最新）：
+**Stage-I 训练**（z 0.25，普通扰动）：
 
 ```bash
-python -m mjlab.scripts.train \
+PYTHONPATH=src python -m mjlab.scripts.train \
   Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation \
   --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
   --env.scene.num-envs 4096 \
   --agent.max-iterations 30000 \
-  --agent.run-name "dance1_subject2" \
-  --agent.resume True \
-  --agent.load-run ".*dance1_subject2"
+  --agent.run-name "dance1_subject2_fall"
 ```
 
-**播放**（play 模式下躺倒初始化组关闭、保留容忍终止，可手动推倒后
-观察自行爬起）：
+**Stage-I Resume（同阶段断点续训）**：
 
 ```bash
-python -m mjlab.scripts.play \
+PYTHONPATH=src python -m mjlab.scripts.train \
   Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation \
+  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
+  --env.scene.num-envs 4096 \
+  --agent.max-iterations 30000 \
+  --agent.run-name "dance1_subject2_fall" \
+  --agent.resume True \
+  --agent.load-run ".*dance1_subject2_fall"
+```
+
+**Stage-II 训练**（从 Stage-I checkpoint resume；z 仍 0.25，加大推扰/RSI）：
+
+```bash
+PYTHONPATH=src python -m mjlab.scripts.train \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II \
+  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
+  --env.scene.num-envs 4096 \
+  --agent.max-iterations 30000 \
+  --agent.run-name "dance1_subject2_fall_stage2" \
+  --agent.resume True \
+  --agent.load-run ".*dance1_subject2_fall"
+```
+
+**Stage-II Resume（二阶段断点续训）**：
+
+```bash
+PYTHONPATH=src python -m mjlab.scripts.train \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II \
+  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
+  --env.scene.num-envs 4096 \
+  --agent.max-iterations 30000 \
+  --agent.run-name "dance1_subject2_fall_stage2" \
+  --agent.resume True \
+  --agent.load-run ".*dance1_subject2_fall_stage2"
+```
+
+**播放 Stage-I**：
+
+```bash
+PYTHONPATH=src python -m mjlab.scripts.play \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation \
+  --motion-file $PWD/motions/dance1_subject2.npz \
+  --keep-randomization True
+```
+
+**播放 Stage-II**：
+
+```bash
+PYTHONPATH=src python -m mjlab.scripts.play \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II \
   --motion-file $PWD/motions/dance1_subject2.npz \
   --keep-randomization True
 ```
@@ -507,7 +545,7 @@ done
 - [x] 手部抬到上面去
 - [x] 部分低动态动作使用空翻高动态训练跟踪不好,直接二阶段resume就可以了，收紧终止条件
 - [x] 查尔斯顿舞的长序列动作(3min) 
-- [] 倒地恢复的力课程
+- [x] 倒地恢复的力课程
 - [] 更高的抗扰性，地形，更强的跟踪能力(适应模块)
 - [] EX-RGMT
 
@@ -787,3 +825,16 @@ Go2 敏捷参考动作（空翻、跳跃等）由
 本工作的跟踪训练与演示位于
 [dev/go2-mimic](https://github.com/Renkunzhao/mjlab/tree/dev/go2-mimic)
 分支。
+
+倒地恢复与舞蹈跟踪任务还受益于以下开源工作，谨致谢意：
+
+- **[AMP_mjlab](https://github.com/yusongmin1/AMP_mjlab)**（[ccrpRepo](https://github.com/ccrpRepo)）：
+  恢复窗口（延迟终止）设计，为本仓库 Fall-Recovery 的起身窗口提供了重要参考。
+- **拉力课程**（[yusongmin1](https://github.com/yusongmin1) /
+  [AMP_mjlab](https://github.com/yusongmin1/AMP_mjlab)）：
+  torso 向上拉力的课程式衰减（初始力逐步撤出），为本仓库
+  `recovery_assist_force` 提供了参考。
+- **[KungFuAthleteBot](https://kungfuathletebot.github.io/)**
+  （[arXiv:2602.13656](https://arxiv.org/abs/2602.13656)）：
+  躺倒状态池初始化、爬起奖励塑形、多阶段收紧终止与加大扰动
+  （`VELOCITY_RANGE_ADD` 等）等设计，为本仓库倒地恢复两阶段训练提供了参考。
