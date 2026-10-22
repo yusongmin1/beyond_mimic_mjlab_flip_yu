@@ -137,7 +137,8 @@ python scripts/sim2sim_g1_mujoco.py --match_isaac
 更多参数见 `python scripts/sim2sim_g1_mujoco.py -h`。
 
 ### G1 Dance / Dance Fall-Recovery 任务
-
+！！！可以先在舞蹈里面训练5000轮以上，学会粗跟踪，一上来就训练这个初期的奖励会很长时间的负数很难突破到正数
+，这是由于添加了几个负奖励
 基于 `tracking_env_cfg_dance.py` 的宽松锚点奖励配置（root_pos 1.0 /
 root_ori 0.5），执行器已启用梯形力矩-速度包络（见下节）。当前动作数据：
 `motions/dance1_subject2.npz`。
@@ -158,8 +159,7 @@ https://github.com/user-attachments/assets/eb524be3-7516-4cda-9a3c-75061196aa39
 | `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery` | 舞蹈 + 倒地恢复（Stage-I，z 0.25） | `logs/rsl_rl/g1_fall_recovery/` |
 | `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation` | 同上，无状态估计（Stage-I） | 同上 |
 | `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II` | 倒地恢复 Stage-II（终止同 I，仅加大推扰/RSI） | 同上 |
-！！！可以先在舞蹈里面训练5000轮以上，学会粗跟踪，一上来就训练这个初期的奖励会很长时间的负数很难突破到正数
-，这是由于添加了几个负奖励
+
 纯 Dance 训练示例：
 
 ```bash
