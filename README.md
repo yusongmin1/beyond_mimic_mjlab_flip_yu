@@ -538,7 +538,15 @@ $$
 
 ### 非线性摩擦项（论文式 6）
 
-力矩削波之后，再扣除执行器内部摩擦损耗：
+**何时引入**：与梯形力矩–速度包络一并加入 `UnitreeActuator`
+（commit「添加力矩包络线」）。之后所有 G1 任务（跟踪 / Dance /
+Fall-Recovery）共用，并非倒地恢复单独开启。
+
+**为何引入**：在 PD 出力并经包络削波后，再扣除关节摩擦损耗，使仿真更接近
+真机传动阻力，缩小「仿真能跟、真机跟不动」的 sim2real 差距。摩擦与速度同号、
+从指令力矩中减去，始终阻碍运动。
+
+力矩削波之后的摩擦模型：
 
 $$
 \tau_{\mathrm{applied}} = \tau_{\mathrm{clipped}}
@@ -546,15 +554,20 @@ $$
 - \mu_d\, v
 $$
 
-（右式两项分别为平滑库仑摩擦与粘性摩擦。）
+- **平滑库仑摩擦** μ_s tanh(v / v_act)：`tanh` 是 sign(v) 的光滑近似，在
+  |v| ≤ v_act 内从 0 爬升并饱和到 ±μ_s，刻画静摩擦→动摩擦过渡；
+- **粘性摩擦** μ_d v：与速度成正比的耗散阻尼。
 
-- **平滑库仑摩擦项** μ_s tanh(v / v_act)：`tanh` 是符号函数 sign(v) 的光滑近似，
-  在 |v| ≤ v_act 内从 0 平滑爬升并很快饱和到 ±μ_s，捕捉静摩擦→动摩擦的过渡；
-- **粘性摩擦项** μ_d v：与速度成正比的耗散，提供附加阻尼。
+实现：`UnitreeActuator.compute()`（减摩擦）与 `_clip_effort()`（包络削波）。
 
-摩擦始终与速度同号、从指令力矩中扣除，因此总是阻碍运动。实现见
-`UnitreeActuator.compute()`（削波后的减摩擦）与 `_clip_effort()`
-（包络锥削削波）。
+**数值参考与落点**：
+
+| 来源 | 内容 |
+| :--- | :--- |
+| [unitree_rl_lab `unitree_actuators.py`](https://github.com/unitreerobotics/unitree_rl_lab/blob/main/source/unitree_rl_lab/unitree_rl_lab/assets/robots/unitree_actuators.py) | 摩擦模型与 μ_s / μ_d / v_act 的直接出处 |
+| [OmniXtreme](https://arxiv.org/abs/2602.23843) III-B / Table IX / 式 6 | 论文侧执行器约束与摩擦项表述 |
+| OmniXtreme `deploy_mujoco.py` | 同套 `Fs/Fd/Va`（如 7520-22：Va=0.01, Fs=2.4, Fd=0.24） |
+| 本仓库 `g1_constants.py` | `ENVELOPE_*_FRICTION`；(μ_s, μ_d)；`UnitreeActuatorCfg.va=0.01` |
 
 ### 电机参数（unitree_rl_lab / OmniXtreme Table IX）
 
