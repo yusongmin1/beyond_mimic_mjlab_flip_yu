@@ -144,9 +144,11 @@ root_ori 0.5），执行器已启用梯形力矩-速度包络（见下节）。�
 
 **倒地恢复演示**：
 
-<p align="center">
-  <video src="https://github.com/user-attachments/assets/eb524be3-7516-4cda-9a3c-75061196aa39" controls width="50%"></video>
-</p>
+<div align="center">
+
+https://github.com/user-attachments/assets/eb524be3-7516-4cda-9a3c-75061196aa39
+
+</div>
 
 | 任务 ID | 说明 | 日志目录 |
 | :--- | :--- | :--- |
