@@ -144,7 +144,9 @@ root_ori 0.5），执行器已启用梯形力矩-速度包络（见下节）。�
 
 **倒地恢复演示**：
 
-<video src="https://github.com/yusongmin1/beyond_mimic_mjlab_flip_yu/raw/master/videos/%E5%80%92%E5%9C%B0%E6%81%A2%E5%A4%8D.mp4" controls width="200" height="356"></video>
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/eb524be3-7516-4cda-9a3c-75061196aa39" controls width="50%"></video>
+</p>
 
 | 任务 ID | 说明 | 日志目录 |
 | :--- | :--- | :--- |
