@@ -501,8 +501,8 @@ done
 - [x] 查尔斯顿舞的长序列动作(2min) 
 - [x] 倒地恢复的力课程
 - [x] 更高的抗扰性，
-- []  地形，更强的跟踪能力(适应模块)
-- []  EX-RGMT
+- [ ]  地形，更强的跟踪能力(适应模块)
+- [ ]  EX-RGMT
 
 ## G1 执行器建模：梯形力矩-速度包络与非线性摩擦
 
@@ -515,13 +515,16 @@ III-B 节 "Actuation-Aware Torque–Speed Constraints" 与 Table IX。
 ### 梯形力矩-速度包络（论文式 4–5）
 
 $$
-\tau_{\max}(v)=\begin{cases}\tau_{y1}, & |v|\le v_{x1},\ v\cdot\tau>0 \\[2pt]
-\tau_{y2}, & |v|\le v_{x1},\ v\cdot\tau\le 0 \\[2pt]
-\tau_{\text{peak}}\!\left(1-\dfrac{|v|-v_{x1}}{v_{x2}-v_{x1}}\right), & v_{x1}<|v|\le v_{x2} \\[2pt]
-0, & |v|>v_{x2}\end{cases}
+\tau_{\max}(v)=
+\begin{cases}
+\tau_{y1}, & |v|\le v_{x1},\ v\cdot\tau>0 \\
+\tau_{y2}, & |v|\le v_{x1},\ v\cdot\tau\le 0 \\
+\tau_{\mathrm{peak}}\left(1-\dfrac{|v|-v_{x1}}{v_{x2}-v_{x1}}\right), & v_{x1}<|v|\le v_{x2} \\
+0, & |v|>v_{x2}
+\end{cases}
 $$
 
-其中 $\tau_{\text{peak}}$ 按力矩与速度方向选取：同向（驱动）取 $\tau_{y1}$，
+其中 $\tau_{\mathrm{peak}}$ 按力矩与速度方向选取：同向（驱动）取 $\tau_{y1}$，
 反向（制动）取 $\tau_{y2}$（反电动势使制动峰值更高）。超出 $v_{x1}$（T-N 曲线
 拐点）后峰值力矩线性锥削，至空载转速 $v_{x2}$ 降为零；指令力矩最终被裁剪到
 $[-\tau_{\max},\ \tau_{\max}]$ 内。
@@ -531,11 +534,13 @@ $[-\tau_{\max},\ \tau_{\max}]$ 内。
 力矩削波之后，再扣除执行器内部摩擦损耗：
 
 $$
-\tau_{\text{applied}}=\tau_{\text{clipped}}-\underbrace{\mu_{s}\tanh\!\left(\frac{v}{v_{\text{act}}}\right)}_{\text{平滑库仑摩擦}}-\underbrace{\mu_{d}\,v}_{\text{粘性摩擦}}
+\tau_{\mathrm{applied}}=\tau_{\mathrm{clipped}}-\mu_{s}\tanh\left(\frac{v}{v_{\mathrm{act}}}\right)-\mu_{d}\,v
 $$
 
-- **平滑库仑摩擦项** $\mu_s\tanh(v/v_{\text{act}})$：`tanh` 是符号函数
-  $\operatorname{sign}(v)$ 的光滑近似，在 $|v|\lesssim v_{\text{act}}$ 内
+（右式两项分别为平滑库仑摩擦与粘性摩擦。）
+
+- **平滑库仑摩擦项** $\mu_s\tanh(v/v_{\mathrm{act}})$：`tanh` 是符号函数
+  $\mathrm{sign}(v)$ 的光滑近似，在 $|v|\le v_{\mathrm{act}}$ 内
   从 0 平滑爬升并很快饱和到 $\pm\mu_s$，捕捉静摩擦→动摩擦的过渡；
 - **粘性摩擦项** $\mu_d v$：与速度成正比的耗散，提供附加阻尼。
 
@@ -553,7 +558,7 @@ $$
 | 7520-22.5 | hip_roll / knee | 111.0 | 131.0 | 14.5 | 22.7 | 2.4 | 0.24 | 2.510e-2 |
 | 4010-25 | wrist_pitch / wrist_yaw | 4.8 | 8.6 | 15.3 | 24.76 | 0.6 | 0.06 | 4.250e-3 |
 
-摩擦激活速度 $v_{\text{act}}=0.01$ rad/s。腰部俯仰/侧倾与双踝为两台 5020
+摩擦激活速度 $v_{\mathrm{act}}=0.01$ rad/s。腰部俯仰/侧倾与双踝为两台 5020
 电机经四连杆并联驱动（名义 1:1 传动比）：力矩类参数（$\tau_{y1}$、$\tau_{y2}$、
 $\mu_s$、$\mu_d$）与折算惯量 $I$、PD 增益均 ×2，速度角点 $v_{x1}$、$v_{x2}$
 不缩放（并联电机转速相同）。
@@ -576,12 +581,12 @@ Regularization**（功率安全执行器正则化）：对瞬时机械功率
 $P_j=\tau_j\dot{q}_j$ 中超出死区的**负功率**（再生制动功率）做平方惩罚
 
 $$
-\mathcal{L}_{\text{neg-power}}=\sum_{j\in\mathcal{J}}\left(\frac{\max\!\bigl(-P_{j}-P_{\text{db}},\ 0\bigr)}{K}\right)^{2}
+L_{\mathrm{neg\_power}}=\sum_{j\in\mathcal{J}}\left(\frac{\max(-P_{j}-P_{\mathrm{db}},\,0)}{K}\right)^{2}
 $$
 
 附录 V-K 给出的具体数值（针对膝关节，通过正则 `".*_knee_joint"` 选取）：
-死区 $P_{\text{db}}=150\ \mathrm{W}$，归一化常数 $K=500$，奖励权重 $w=-10$，
-即 $r_{\text{knee}}=-10\sum_{j}\bigl(\tilde{P}_j/500\bigr)^2$，
+死区 $P_{\mathrm{db}}=150\,\mathrm{W}$，归一化常数 $K=500$，奖励权重 $w=-10$，
+即 $r_{\mathrm{knee}}=-10\sum_{j}(\tilde{P}_j/500)^2$，
 $\tilde{P}_j=\max(0,\ -P_j-150)$。
 
 **仅作用于双膝关节**，且主要针对高动态动作（后空翻等），原因有三：
@@ -600,7 +605,7 @@ $\tilde{P}_j=\max(0,\ -P_j-150)$。
 
 信号流：$P_j=\tau_j\dot{q}_j\ \rightarrow\ \tilde{P}_j=\max(-P_j-150,0)\ \rightarrow\ \bigl(\tilde{P}_j/500\bigr)^2\ \rightarrow\ \times(-10)$。
 
-**死区 $P_{\text{db}}=150$ W——只罚「冲击级」制动**。150 W 以内的制动完全免费，
+**死区 $P_{\mathrm{db}}=150$ W——只罚「冲击级」制动**。150 W 以内的制动完全免费，
 典型场景（rad/s × N·m = W）：
 
 | 场景 | $\tau$ (N·m) | $\omega$ (rad/s) | $P_j$ | $\tilde{P}_j$ | 单膝惩罚 |
@@ -621,7 +626,7 @@ $\max(\cdot,0)$ 在边界处梯度为零，起罚点光滑无跳变。
 时惩罚恰为 −10；仅超出 50 W 时 $(50/500)^2=0.01$ 可忽略。平方形式使梯度
 $\partial r/\partial P_j\propto\tilde{P}_j$ 随违例幅度线性增长：小违例几乎
 无学习信号、大违例梯度陡峭；且过流/热损伤 $\propto$ 电流²、再生电流
-$\propto$ 再生功率，故损伤 $\propto P_{\text{regen}}^2$——**平方惩罚在数学
+$\propto$ 再生功率，故损伤 $\propto P_{\mathrm{regen}}^2$，**平方惩罚在数学
 形式上就是热应变的代理**。
 
 **权重 $w=-10$——等效软硬约束边界 ≈ 450 W/膝**。与每步正奖励（总量级
