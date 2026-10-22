@@ -1,5 +1,6 @@
 """Unitree G1 flat tracking environment configurations."""
 
+import math
 import os
 from typing import Literal
 
@@ -106,10 +107,12 @@ def unitree_g1_flat_dance_env_cfg(
       max_recovery_steps the total get-up budget is 4 s by default.
     recovery_assist_initial_force: Initial upward assist force (N) on the
       torso while a recovery env is down; decays to 0 over training.
-    fall_recovery_stage: Both stages use anchor z 0.25 m. Stage-I uses
-      baseline push/RSI; Stage-II adds KungFu Stage-III-style stronger
-      push + larger RSI pose/velocity (``VELOCITY_RANGE_ADD``). Both
-      share tolerant + delayed windows.
+    fall_recovery_stage: Two stages (shared tolerant + delayed get-up
+      windows; same terminations both stages — ``anchor_pos_z`` 0.25 m +
+      ``ori`` 0.8):
+      - 1: baseline push/RSI
+      - 2: KungFu-III-style stronger push + larger RSI
+        (``VELOCITY_RANGE_ADD``)
   """
   cfg = make_dance_env_cfg()
   return _apply_g1_overrides(
@@ -136,15 +139,10 @@ def unitree_g1_flat_dance_env_cfg_stage_ii(
   play: bool = False,
   enable_actuator_delay: bool = True,
 ) -> ManagerBasedRlEnvCfg:
-  """Dance Stage-II (KungFuAthleteBot-style): tighter tracking + stronger push.
+  """Dance Stage-II: tighter tracking + stronger push.
 
-  Relative to Stage-I (plain ``unitree_g1_flat_dance_env_cfg``):
-  - terminations: full ``anchor_pos`` (1.0 m) instead of z-only; ``anchor_ori``
-    0.8 → 0.6; drop ``ee_body_pos`` z-only (same swaps as KungFu Stage-II);
-  - push / RSI velocity: ``VELOCITY_RANGE_ADD`` (same as KungFu Stage-III push);
-  - RSI pose noise unchanged from Stage-I (±0.05 m xy / ±0.01 m z).
-
-  Intended to resume from a Stage-I Dance checkpoint.
+  Relative to Stage-I: full ``anchor_pos`` 1.0 m; ``anchor_ori`` 0.6;
+  drop ``ee_body_pos``; ``hip_dof`` π/6; push/RSI ``VELOCITY_RANGE_ADD``.
   """
   cfg = unitree_g1_flat_dance_env_cfg(
     has_state_estimation=has_state_estimation,
@@ -160,29 +158,24 @@ def unitree_g1_flat_dance_env_cfg_stage_ii(
 def _apply_dance_stage_ii_overrides(
   cfg: ManagerBasedRlEnvCfg, *, play: bool
 ) -> ManagerBasedRlEnvCfg:
-  """Apply KungFu-style Stage-II tracking limits + stronger push (config only)."""
-  # --- Stricter tracking terminations (KungFu Stage-II) ---
+  """KungFu-style Stage-II tracking limits + stronger push (config only)."""
   cfg.terminations["anchor_pos"] = TerminationTermCfg(
     func=mdp.bad_anchor_pos,
     params={"command_name": "motion", "threshold": 1.0},
   )
   cfg.terminations["anchor_ori"].params["threshold"] = 0.6
   cfg.terminations.pop("ee_body_pos", None)
-
-  # Play mode already clears RSI / push in ``_apply_g1_overrides``; keep that.
+  cfg.terminations["hip_dof"] = TerminationTermCfg(
+    func=mdp.bad_hip_dof,
+    params={"command_name": "motion", "threshold": math.pi / 6},
+  )
   if play:
     return cfg
-
-  # --- Stronger push + RSI velocity (KungFu Stage-III push magnitude) ---
-  # RSI pose noise stays at Stage-I values (dance base cfg); only the
-  # velocity noise is enlarged.
   motion_cmd = cfg.commands["motion"]
   assert isinstance(motion_cmd, MotionCommandCfg)
   motion_cmd.velocity_range = VELOCITY_RANGE_ADD
-
   if "push_robot" in cfg.events:
     cfg.events["push_robot"].params["velocity_range"] = VELOCITY_RANGE_ADD
-
   return cfg
 
 
@@ -371,34 +364,34 @@ def _apply_g1_overrides(
     # 2) Termination: replace immediate tracking terminations with a
     #    tolerant version — normal envs terminate instantly; recovery envs
     #    get a continuous-bad-tracking window before the reset is released.
-    #    Both stages use z 0.25 m (0.5 m is too loose to train well).
-    #    Stage-II difference is stronger push / RSI (below), not z.
-    z_threshold = 0.25
+    #    Both stages use the same terms (z 0.25 + ori 0.8); Stage-II only
+    #    adds stronger push / RSI (below).
+    tolerant_terms = [
+      ("anchor_pos_z", mdp.bad_anchor_pos_z_only, {
+        "command_name": "motion",
+        "threshold": 0.25,
+      }),
+      ("anchor_ori", mdp.bad_anchor_ori, {
+        "asset_cfg": SceneEntityCfg("robot"),
+        "command_name": "motion",
+        "threshold": 0.8,
+      }),
+    ]
     cfg.terminations["tracking_failure"] = TerminationTermCfg(
       func=mdp.TolerantTermination(
         bad_tracking_time_threshold_s=bad_tracking_time_threshold_s,
         command_name="motion",
-        terms=[
-          ("anchor_pos_z", mdp.bad_anchor_pos_z_only, {
-            "command_name": "motion",
-            "threshold": z_threshold,
-          }),
-          ("anchor_ori", mdp.bad_anchor_ori, {
-            "asset_cfg": SceneEntityCfg("robot"),
-            "command_name": "motion",
-            "threshold": 0.8,
-          }),
-        ],
+        terms=tolerant_terms,
       ),
       params={},
     )
     cfg.terminations.pop("anchor_pos", None)
     cfg.terminations.pop("anchor_ori", None)
     cfg.terminations.pop("ee_body_pos", None)
+    cfg.terminations.pop("hip_dof", None)
 
-    # 2b) Stage-II: KungFu Stage-III-style stronger disturbance (train only).
-    #     Larger RSI pose/velocity + VELOCITY_RANGE_ADD push. Play clears
-    #     these later in the play overrides below.
+    # 2b) Stage-II only: KungFu-III-style stronger disturbance (train only).
+    #     Larger RSI pose/velocity + VELOCITY_RANGE_ADD push.
     if fall_recovery_stage >= 2 and not play:
       motion_cmd.pose_range = {
         "x": (-0.15, 0.15),
@@ -508,6 +501,12 @@ def _apply_g1_overrides(
       func=mdp.penalty_recovery_window_timeout,
       weight=-200.0,
     )
+    # # Stage-I only: constant alive bonus (encourages staying non-terminated).
+    # if fall_recovery_stage < 2:
+    #   cfg.rewards["alive"] = RewardTermCfg(
+    #     func=mdp.is_alive,
+    #     weight=0.2,
+    #   )
 
   cfg.viewer.body_name = "torso_link"
 

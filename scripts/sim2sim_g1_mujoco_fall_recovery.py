@@ -279,8 +279,10 @@ NPZ_BODY_IDX_30 = [0, 2, 4, 6, 8, 10, 12, 15, 17, 19, 22, 24, 26, 29]
 
 # ----------------------------------------------------------------- policy discovery
 def _short_policy_name(run: str) -> str:
-    """Human-readable label for Stage-I / Stage-II fall-recovery runs."""
+    """Human-readable label for Stage-I / II / III fall-recovery runs."""
     low = run.lower()
+    if "stage3" in low or "stage_iii" in low or "stage-iii" in low:
+        return f"Stage-III {run}"
     if "stage2" in low or "stage_ii" in low or "stage-ii" in low:
         return f"Stage-II  {run}"
     if "fall" in low:
@@ -288,12 +290,29 @@ def _short_policy_name(run: str) -> str:
     return run
 
 
-def list_policies() -> list[tuple[str, str]]:
-    """All (display_name, path) pairs from g1_fall_recovery exported ONNX files.
+def _is_stage3_run(run: str) -> bool:
+    low = run.lower()
+    return "stage3" in low or "stage_iii" in low or "stage-iii" in low
 
-    A run directory can contain BOTH a fresh ``exported/policy.onnx`` and a
-    legacy ``<run>.onnx`` dropped by an older exporter. When both exist,
-    prefer ``exported/policy.onnx`` and hide the legacy file.
+
+def _is_stage2_run(run: str) -> bool:
+    low = run.lower()
+    if _is_stage3_run(run):
+        return False
+    return "stage2" in low or "stage_ii" in low or "stage-ii" in low
+
+
+# fallen_mode: "" = stand spawn; "pool" = base training pool (2048 diverse)
+FallenMode = str
+
+
+def list_policies() -> list[tuple[str, str, FallenMode]]:
+    """(display_name, onnx_path, fallen_mode) from g1_fall_recovery exports.
+
+    After Stage-I / Stage-II stand entries, appends FALLEN-INIT skills that
+    reuse the same ONNX but spawn from the default diverse fallen pool
+    (2048 poses from ``robot_init_states_g1_8192.pth``). Reference frame is
+    sampled randomly (same as training fallen-init).
     """
     fresh: dict[str, str] = {}
     legacy: dict[str, str] = {}
@@ -304,22 +323,69 @@ def list_policies() -> list[tuple[str, str]]:
         run = os.path.basename(os.path.dirname(onnx_file))
         if run not in fresh:
             legacy[run] = onnx_file
-    out = []
+    out: list[tuple[str, str, FallenMode]] = []
 
     def _sort_key(run: str) -> tuple[int, str]:
-        low = run.lower()
-        if "stage2" in low or "stage_ii" in low or "stage-ii" in low:
+        if _is_stage3_run(run):
+            return (2, run)
+        if _is_stage2_run(run):
             return (1, run)
-        if "fall" in low:
+        if "fall" in run.lower():
             return (0, run)
-        return (2, run)
+        return (3, run)
 
+    stage1: tuple[str, str, FallenMode] | None = None
+    stage2: tuple[str, str, FallenMode] | None = None
+    stage3: tuple[str, str, FallenMode] | None = None
     for run in sorted(set(fresh) | set(legacy), key=_sort_key):
         label = _short_policy_name(run)
-        if run in fresh:
-            out.append((label, fresh[run]))
-        else:
-            out.append((label + " (legacy onnx)", legacy[run]))
+        path = fresh[run] if run in fresh else legacy[run]
+        if run not in fresh:
+            label = label + " (legacy onnx)"
+        entry = (label, path, "")
+        out.append(entry)
+        if _is_stage3_run(run):
+            if stage3 is None:
+                stage3 = entry
+        elif _is_stage2_run(run):
+            if stage2 is None:
+                stage2 = entry
+        elif "fall" in run.lower():
+            if stage1 is None:
+                stage1 = entry
+
+    def _run_name_from_onnx(path: str) -> str:
+        # .../run/exported/policy.onnx or .../run/run.onnx
+        parent = os.path.basename(os.path.dirname(path))
+        if parent == "exported":
+            return os.path.basename(os.path.dirname(os.path.dirname(path)))
+        return parent
+
+    # Virtual FALLEN-INIT slots (default 2048 pool) after stand entries.
+    if stage1 is not None:
+        out.append(
+            (
+                f"Stage-I   FALLEN-INIT  {_run_name_from_onnx(stage1[1])}",
+                stage1[1],
+                "pool",
+            )
+        )
+    if stage2 is not None:
+        out.append(
+            (
+                f"Stage-II  FALLEN-INIT  {_run_name_from_onnx(stage2[1])}",
+                stage2[1],
+                "pool",
+            )
+        )
+    if stage3 is not None:
+        out.append(
+            (
+                f"Stage-III FALLEN-INIT  {_run_name_from_onnx(stage3[1])}",
+                stage3[1],
+                "pool",
+            )
+        )
     return out
 
 
@@ -332,23 +398,24 @@ def resolve_policy(spec: str) -> str:
         raise SystemExit(f"[ERROR] policy index {i} out of range (0..{len(polys) - 1}); see --list")
     if os.path.isfile(spec):
         return spec
-    hits = [p for name, p in polys if spec.lower() in name.lower()]
+    hits = [p for name, p, _m in polys if spec.lower() in name.lower()]
     if len(hits) == 1:
         return hits[0]
     if len(hits) > 1:
         print("[ERROR] ambiguous policy substring, matches:")
-        for name, p in polys:
+        for name, p, mode in polys:
             if spec.lower() in name.lower():
-                print("   ", name)
+                print("   ", name, f"[{mode}]" if mode else "")
         raise SystemExit(1)
     raise SystemExit(f"[ERROR] no policy matches '{spec}'; see --list")
 
 
 if args.list:
     polys = list_policies()
-    print(f"{len(polys)} g1_fall_recovery policies in {_TRACKING_DIR}:")
-    for i, (name, p) in enumerate(polys):
-        print(f"  [{i:2d}] {name}")
+    print(f"{len(polys)} g1_fall_recovery switch targets in {_TRACKING_DIR}:")
+    for i, (name, p, mode) in enumerate(polys):
+        tag = f"  [{mode}]" if mode else ""
+        print(f"  [{i:2d}] {name}{tag}")
         print(f"        {os.path.relpath(p, _MJLAB_ROOT)}")
     raise SystemExit(0)
 
@@ -362,12 +429,25 @@ POLICIES = list_policies()
 if not POLICIES and args.policy is None:
     raise SystemExit("[ERROR] no g1_fall_recovery policies found; need at least one for mimic skills")
 
+
+def _policy_fallen_mode(idx: int) -> FallenMode:
+    if idx < 0 or idx >= len(POLICIES):
+        return ""
+    mode = POLICIES[idx][2] if len(POLICIES[idx]) > 2 else ""
+    return mode or ""
+
+
 if args.policy is not None:
     policy_path = resolve_policy(args.policy)
     try:
-        cur_policy_idx = next(i for i, (n, p) in enumerate(POLICIES) if os.path.samefile(p, policy_path))
+        # Prefer stand-spawn entry when resolving by path / substring.
+        cur_policy_idx = next(
+            i
+            for i, (n, p, mode) in enumerate(POLICIES)
+            if (not mode) and os.path.samefile(p, policy_path)
+        )
     except (StopIteration, OSError):
-        POLICIES.insert(0, ("(adhoc) " + os.path.basename(policy_path), policy_path))
+        POLICIES.insert(0, ("(adhoc) " + os.path.basename(policy_path), policy_path, ""))
         cur_policy_idx = 0
 else:
     cur_policy_idx = 0
@@ -418,6 +498,7 @@ if args.match_isaac:
 
 free_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "floating_base_joint")
 free_adr = model.jnt_qposadr[free_jid]
+free_dof_adr = model.jnt_dofadr[free_jid]
 anchor_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, ANCHOR_BODY)
 assert anchor_body_id >= 0
 
@@ -540,10 +621,12 @@ if args.action_scale is not None:
 # action scale so the viewer can swap everything with ONE keystroke.
 class Runtime:
     def __init__(self, idx: int):
-        name, path = POLICIES[idx]
+        name, path = POLICIES[idx][0], POLICIES[idx][1]
         self.idx = idx
         self.name = name
         self.path = path
+        self.fallen_mode = _policy_fallen_mode(idx)
+        self.fallen_init = bool(self.fallen_mode)
         run, meta, emb = load_policy(path)
         self.run = run                      # obs,t -> action(29)
         self.meta = meta
@@ -573,6 +656,99 @@ class Runtime:
         except Exception as e:
             print(f"[switch] FAILED to load {POLICIES[idx][0]}: {e}")
             return self
+
+
+# ----------------------------------------------------------------- fallen-init pool
+_FALLEN_BASE_PTH = os.path.join(
+    _MJLAB_ROOT,
+    "src",
+    "mjlab",
+    "tasks",
+    "tracking",
+    "assets",
+    "robot_init_states_g1_8192.pth",
+)
+
+
+class FallenInitSampler:
+    """Sample lying poses from the default diverse pool (2048 of 8192).
+
+    Lazy + cached: the heavy part is the greedy farthest-point sampling on
+    8192 quaternions (~1 min on CPU). The selected 2048-subset is written to
+    ``<base>.div2048.pt`` next to the source pool and re-used from then on, so
+    the first FALLEN-INIT use costs ~1 min but every later start is instant.
+    """
+
+    _CACHE_SUFFIX = ".div2048.pt"
+
+    def __init__(self, base_path: str, num_diverse: int = 2048) -> None:
+        import torch
+
+        if not os.path.isfile(base_path):
+            raise FileNotFoundError(base_path)
+        cache_path = base_path + self._CACHE_SUFFIX
+        if os.path.isfile(cache_path):
+            cached = torch.load(cache_path, map_location="cpu", weights_only=False)
+            self.dof = cached["dof_pos"].numpy().astype(np.float64)
+            self.root_xyzw = cached["robot_root_states_xyzw"].numpy().astype(np.float64)
+            print(f"[fallen-pool] {self.root_xyzw.shape[0]} diverse poses (cache) from {cache_path}")
+            return
+        # Reuse training pool logic (diverse 2048, no user merge).
+        t0 = time.time()
+        sys.path.insert(0, os.path.join(_MJLAB_ROOT, "src"))
+        from mjlab.tasks.tracking.mdp.recovery import RecoveryFallenPool
+
+        pool = RecoveryFallenPool.get()
+        pool.init(base_path, num_diverse=num_diverse)
+        assert pool._data is not None
+        # ``init`` already materializes the diverse subset into ``_data``.
+        self.dof = pool._data["dof_pos"].numpy().astype(np.float64)
+        self.root_xyzw = pool._data["robot_root_states_xyzw"].numpy().astype(np.float64)
+        print(f"[fallen-pool] {self.root_xyzw.shape[0]} diverse poses from {base_path}")
+        try:
+            torch.save(
+                {
+                    "dof_pos": torch.from_numpy(self.dof.astype(np.float32)),
+                    "robot_root_states_xyzw": torch.from_numpy(self.root_xyzw.astype(np.float32)),
+                },
+                cache_path,
+            )
+            print(
+                f"[fallen-pool] cached diverse subset -> {cache_path} "
+                f"(init took {time.time() - t0:.1f}s; next start is instant)"
+            )
+        except OSError as e:
+            print(f"[fallen-pool] WARN: could not write cache {cache_path}: {e}")
+
+    def sample(self, mode: FallenMode = "pool") -> tuple[np.ndarray, np.ndarray]:
+        del mode  # only the default pool is used
+        i = int(np.random.randint(0, self.root_xyzw.shape[0]))
+        out_root = self.root_xyzw[i].copy()
+        out_root[7:13] = 0.0
+        return out_root, self.dof[i].copy()
+
+
+_fallen_sampler: FallenInitSampler | None = None
+
+
+def get_fallen_sampler() -> FallenInitSampler | None:
+    """Create the fallen-init pool on first FALLEN-INIT use (lazy).
+
+    Building the diverse subset takes ~1 min (greedy FPS over 8192 poses);
+    deferring it past viewer launch keeps normal start-ups instant.
+    """
+    global _fallen_sampler
+    if _fallen_sampler is not None:
+        return _fallen_sampler
+    if not os.path.isfile(_FALLEN_BASE_PTH):
+        print(f"[WARN] fallen-init pool missing ({_FALLEN_BASE_PTH}); FALLEN-INIT slots disabled")
+        return None
+    try:
+        _fallen_sampler = FallenInitSampler(_FALLEN_BASE_PTH)
+    except Exception as e:
+        print(f"[WARN] fallen-init pool unavailable ({e}); FALLEN-INIT switch slots disabled")
+        return None
+    return _fallen_sampler
 
 
 # ---- RL locomotion (legged_lab 29dof) + mimic tracking FSM ------------------
@@ -763,6 +939,42 @@ def reset_mimic(t0: int = 0):
     mujoco.mj_forward(model, data)
 
 
+def reset_fallen_from_pool(mode: FallenMode = "pool", t_ref: int | None = None) -> int:
+    """Spawn from fallen .pth; reference frame matches normal (random) sampling.
+
+    Returns the motion frame index ``t_ref`` used for the reference command.
+    """
+    if M["bp"] is None:
+        raise RuntimeError("motion not bound")
+    src = "pool"
+    if t_ref is None:
+        t_ref = int(np.random.randint(0, T))
+    else:
+        t_ref = int(np.clip(t_ref, 0, T - 1))
+    sampler = get_fallen_sampler()
+    if sampler is None:
+        raise RuntimeError("fallen-init pool unavailable")
+    root_xyzw, dof_pos = sampler.sample(src)
+    mujoco.mj_resetData(model, data)
+    # Planar anchor from the sampled reference frame; z / ori / joints from pool.
+    motion_xy = M["bp"][t_ref, pelvis_npz_idx, :2].copy()
+    pos = root_xyzw[:3].copy()
+    pos[:2] = motion_xy
+    q_xyzw = root_xyzw[3:7]
+    q_wxyz = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float64)
+    data.qpos[free_adr : free_adr + 3] = pos
+    data.qpos[free_adr + 3 : free_adr + 7] = q_wxyz
+    data.qpos[mj_qpos_adr] = dof_pos
+    data.qvel[:] = 0.0
+    data.qfrc_applied[:] = 0.0
+    mujoco.mj_forward(model, data)
+    print(
+        f"[fallen-init] sampled [{src}] ref_t={t_ref}/{T - 1}  z={pos[2]:.3f}  "
+        f"quat_wxyz=({q_wxyz[0]:+.2f},{q_wxyz[1]:+.2f},{q_wxyz[2]:+.2f},{q_wxyz[3]:+.2f})"
+    )
+    return t_ref
+
+
 def reset_rl_stand():
     """Spawn standing pose for locomotion RL (rl_sar defaults)."""
     mujoco.mj_resetData(model, data)
@@ -823,6 +1035,7 @@ KEY_SPACE, KEY_R, KEY_L, KEY_C = 32, 82, 76, 67
 KEY_0, KEY_9 = 48, 57
 KEY_W, KEY_A, KEY_S, KEY_D = 87, 65, 83, 68
 KEY_Q, KEY_E = 81, 69
+KEY_Z, KEY_X = 90, 88
 
 
 def key_callback(key):
@@ -849,8 +1062,12 @@ def key_callback(key):
     elif key == KEY_S:
         locomo.nudge_command(dx=-1)
     elif key == KEY_A:
-        locomo.nudge_command(dy=+1)
+        locomo.nudge_command(dy=-1)
     elif key == KEY_D:
+        locomo.nudge_command(dy=+1)
+    elif key == KEY_Z:
+        locomo.nudge_command(dy=+1)
+    elif key == KEY_X:
         locomo.nudge_command(dy=-1)
     elif key == KEY_Q:
         locomo.nudge_command(dyaw=+1)
@@ -867,43 +1084,70 @@ def enter_rl(hard_reset: bool = False):
     print("\n[mode] -> RL locomotion")
 
 
-def enter_mimic(idx: int, hard_reset: bool = False) -> bool:
+def enter_mimic(idx: int, hard_reset: bool = False) -> int | None:
     """Enter a mimic skill.
 
-    ``hard_reset=True`` teleports to motion frame 0 — sim/debug only.
-    Real-robot path (default): keep the current pose, yaw+XY-align the
-    reference to the robot so ``motion_anchor_ori_b`` starts near identity
-    (same as training reset), then track from t=0.
+    Returns the starting motion frame index, or ``None`` on failure.
+
+    ``hard_reset=True`` teleports to a motion frame — sim/debug only.
+    FALLEN-INIT: sample a lying pose from the .pth pool and a **random**
+    reference frame (same as training fallen-init + adaptive/uniform sampling).
+    Stand spawn uses frame 0. Soft-enter (default): yaw+XY-align reference to
+    the robot then track from t=0.
     """
     if not load_mimic(idx):
-        return False
+        return None
     mode["name"] = "MIMIC"
     last_action[:] = 0.0
+    fallen_mode = _policy_fallen_mode(idx)
+    start_t = 0
     if hard_reset:
         _bind_motion(rt.emb_raw)
-        reset_mimic(0)
-        print("[mode] -> MIMIC skill (teleport to frame 0, sim only)")
+        if fallen_mode:
+            if get_fallen_sampler() is None:
+                print("[mode] FALLEN-INIT requested but pool missing; using stand spawn")
+                reset_mimic(0)
+                start_t = 0
+            else:
+                start_t = reset_fallen_from_pool(fallen_mode)
+                print(
+                    f"[mode] -> MIMIC FALLEN-INIT [{fallen_mode}] "
+                    f"(pool sample, random ref t={start_t})"
+                )
+        else:
+            reset_mimic(0)
+            start_t = 0
+            print("[mode] -> MIMIC skill (teleport to frame 0, sim only)")
     else:
-        aligned = align_motion_to_robot(rt.emb_raw)
-        _bind_motion(aligned)
-        # sanity: ori obs at t=0 should be near identity after yaw align
-        q_r = data.xquat[anchor_body_id].astype(np.float64)
-        ori0 = motion_anchor_ori_b(q_r, ref_anchor_quat[0])
-        print(
-            f"[mode] -> MIMIC skill (aligned to robot; "
-            f"ori0 L2-to-I={np.linalg.norm(ori0 - np.array([1, 0, 0, 1, 0, 0])):.3f})"
-        )
-    return True
+        if fallen_mode and get_fallen_sampler() is not None:
+            _bind_motion(rt.emb_raw)
+            start_t = reset_fallen_from_pool(fallen_mode)
+            print(
+                f"[mode] -> MIMIC FALLEN-INIT [{fallen_mode}] "
+                f"(pool sample, random ref t={start_t})"
+            )
+        else:
+            aligned = align_motion_to_robot(rt.emb_raw)
+            _bind_motion(aligned)
+            start_t = 0
+            # sanity: ori obs at t=0 should be near identity after yaw align
+            q_r = data.xquat[anchor_body_id].astype(np.float64)
+            ori0 = motion_anchor_ori_b(q_r, ref_anchor_quat[0])
+            print(
+                f"[mode] -> MIMIC skill (aligned to robot; "
+                f"ori0 L2-to-I={np.linalg.norm(ori0 - np.array([1, 0, 0, 1, 0, 0])):.3f})"
+            )
+    return start_t
 
 
-_HELP_LEFT = "W/S\nA/D\nQ/E\nC\n[/]\n0-9\nL\nSpace\nR"
+_HELP_LEFT = "W/S\nA/D\nZ/X\nQ/E\nC\n[/]\n0-9\nL\nSpace\nR"
 _HELP_RIGHT = (
     "vx +/- (RL)\n"
     "vy +/- (RL)\n"
     "yaw +/- (RL)\n"
     "clear cmd (RL)\n"
-    "mimic (if idle)\n"
-    "mimic (if idle)\n"
+    "prev/next policy\n"
+    "jump policy\n"
     "back to RL\n"
     "pause\n"
     "reset mode"
@@ -967,34 +1211,38 @@ def maybe_viewer():
 print(
     "\nControls (viewer window focused):\n"
     "  [ / ]         previous / next fall-recovery policy (anytime, even mid-skill)\n"
-    "  0 / 1         jump to Stage-I / Stage-II (anytime)\n"
+    "  0 / 1         Stage-I / Stage-II (stand spawn at motion t=0)\n"
+    "  2 / 3         Stage-I / Stage-II FALLEN-INIT (default 2048 diverse pool)\n"
     "  L             return to RL locomotion\n"
-    "  R             reset current skill to frame 0\n"
+    "  R             reset (fallen-init: new pool pose + new random ref frame)\n"
     "  Space         pause / resume\n"
-    "  W/S A/D Q/E   RL velocity commands (only in RL mode)\n"
+    "  W/S A/D Q/E   RL velocity commands\n"
     "  C             clear velocity command\n"
     f"\nStart mode: {start_mode} | policies: {len(POLICIES)} | loop_mimic={args.loop_mimic}\n"
 )
-for i, (name, _) in enumerate(POLICIES):
-    print(f"  [{i}] {name}")
+for i, (name, _p, fmode) in enumerate(POLICIES):
+    tag = f"  << {fmode}" if fmode else ""
+    print(f"  [{i}] {name}{tag}")
 print()
 
 with maybe_viewer() as viewer:
+    t = 0
     if start_mode == "MIMIC":
-        if not enter_mimic(cur_policy_idx, hard_reset=True):
+        start_t = enter_mimic(cur_policy_idx, hard_reset=True)
+        if start_t is None:
             raise SystemExit("[ERROR] failed to start mimic")
+        t = start_t
     else:
         enter_rl(hard_reset=True)
 
     if args.settle > 0.0:
-        q_hold = M["jp"][0] if mode["name"] == "MIMIC" else rl_stand_q
+        q_hold = M["jp"][t] if mode["name"] == "MIMIC" else rl_stand_q
         kp_hold = kp_j if mode["name"] == "MIMIC" else rl_kp_j
         kd_hold = kd_j if mode["name"] == "MIMIC" else rl_kd_j
         for _ in range(int(args.settle / model.opt.timestep)):
             apply_pd(q_hold, kp_hold, kd_hold)
             mujoco.mj_step(model, data)
 
-    t = 0
     step = 0
     err_pos = []
     while True:
@@ -1019,9 +1267,9 @@ with maybe_viewer() as viewer:
             idx = switch_request["idx"]
             switch_request["idx"] = None
             # Fall-recovery: allow hot-switch anytime (Stage-I ↔ Stage-II).
-            # Hard-reset so each policy starts from a clean motion frame 0.
-            if enter_mimic(idx, hard_reset=True):
-                t = 0
+            start_t = enter_mimic(idx, hard_reset=True)
+            if start_t is not None:
+                t = start_t
                 err_pos.clear()
                 print(f"[switch] active policy [{idx}] {POLICIES[idx][0]}")
 
@@ -1029,10 +1277,16 @@ with maybe_viewer() as viewer:
             reset_request["flag"] = False
             if mode["name"] == "RL":
                 enter_rl(hard_reset=True)
+                t = 0
             elif rt is not None:
-                reset_mimic(0)
+                fm = _policy_fallen_mode(rt_idx[0])
+                if fm and get_fallen_sampler() is not None:
+                    _bind_motion(rt.emb_raw)
+                    t = reset_fallen_from_pool(fm)
+                else:
+                    reset_mimic(0)
+                    t = 0
                 last_action[:] = 0.0
-            t = 0
             err_pos.clear()
 
         start = time.time()
@@ -1120,7 +1374,9 @@ with maybe_viewer() as viewer:
         if step % 10 == 0:
             if mode["name"] == "RL":
                 c = locomo.commands
-                print(f"step {step:4d}  [RL] cmd=({c[0]:+.2f},{c[1]:+.2f},{c[2]:+.2f})")
+                print(
+                    f"step {step:4d}  [RL] cmd=({c[0]:+.2f},{c[1]:+.2f},{c[2]:+.2f})"
+                )
             else:
                 print(
                     f"step {step:4d} t={t:3d}  [MIMIC] anchor err {err_pos[-1]:.3f} m  "

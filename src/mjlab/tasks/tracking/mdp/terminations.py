@@ -84,3 +84,24 @@ def bad_motion_body_pos_z_only(
     - command.robot_body_pos_w[:, body_indexes, -1]
   )
   return torch.any(error > threshold, dim=-1)
+
+
+# G1 mjlab / MuJoCo joint order: L hip pitch/roll/yaw, R hip pitch/roll/yaw.
+# Same indices as KungFuAthleteBot ``bad_hip_dof``.
+_HIP_DOF_IDX = (0, 1, 2, 6, 7, 8)
+
+
+def bad_hip_dof(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  threshold: float,
+) -> torch.Tensor:
+  """Terminate when any hip joint tracking error exceeds ``threshold`` (rad).
+
+  KungFuAthleteBot Stage-II/III: default threshold ``π/6``.
+  """
+  command = cast(MotionCommand, env.command_manager.get_term(command_name))
+  error = torch.abs(
+    command.joint_pos[:, _HIP_DOF_IDX] - command.robot_joint_pos[:, _HIP_DOF_IDX]
+  )
+  return torch.any(error > threshold, dim=-1)

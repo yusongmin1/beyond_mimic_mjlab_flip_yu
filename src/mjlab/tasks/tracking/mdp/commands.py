@@ -459,11 +459,11 @@ class MotionCommand(CommandTerm):
   def _apply_fallen_init(self, env_ids: torch.Tensor) -> None:
     """Write a fallen state from the .pth pool into sim for ``env_ids``.
 
-    Uses motion-reference x,y (with pose_range RSI) so the robot starts on
-    the ground at the reference's planar location; z / orientation / joint
-    positions come from the fallen pool sample. Velocities are zeroed.
-    Reference time_steps are rewound to 0 so the policy is graded on getting
-    up and re-tracking from the start of the motion.
+    Uses motion-reference x,y (already sampled via ``sampling_mode``) so the
+    robot starts on the ground at the reference's planar location; z /
+    orientation / joint positions come from the fallen pool. Velocities are
+    zeroed. Reference ``time_steps`` are **kept** (same random/adaptive frame
+    as normal tracking envs) — get up and re-track that frame, not rewind to 0.
     """
     sample = self._fallen_pool.sample(
       len(env_ids), device=self.device, zero_velocity=True
@@ -492,8 +492,6 @@ class MotionCommand(CommandTerm):
     )
     self.robot.write_root_state_to_sim(root_state, env_ids=env_ids)
     self.robot.clear_state(env_ids=env_ids)
-    # Rewind reference to the motion start: the task is stand-up + re-track.
-    self.time_steps[env_ids] = 0
 
   def _resample_command(self, env_ids: torch.Tensor):
     if self.cfg.sampling_mode == "start":
@@ -508,7 +506,7 @@ class MotionCommand(CommandTerm):
     self._roll_recovery_groups(env_ids)
 
     # Fallen-init envs: write lying-on-ground states from the pool and skip
-    # the reference-state reset (reference rewound to motion start).
+    # the reference-state reset (keep the sampled motion time_steps).
     fallen_mask = self.is_fallen_init_env[env_ids]
     fallen_ids = env_ids[fallen_mask]
     tracking_ids = env_ids[~fallen_mask]

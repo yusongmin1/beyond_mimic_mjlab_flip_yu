@@ -12,60 +12,24 @@ mjlab 将 [Isaac Lab](https://github.com/isaac-sim/IsaacLab) 的 manager-based A
 [MuJoCo Warp](https://github.com/google-deepmind/mujoco_warp)（MuJoCo 的 GPU 加速版本）相结合。
 该框架提供可组合的环境设计构建模块，依赖极少，并可直接访问 MuJoCo 原生数据结构。
 
-## 快速上手
+## 安装
 
 训练需要 NVIDIA GPU；macOS 仅支持评估。
 
-**立即体验**（无需安装）：
+安装到特定的conda 环境
+```bash
+uv pip install -e .
+```
+安装到当前目录下的.venv环境
 
 ```bash
-uvx --from mjlab --refresh demo
+uv sync
 ```
-
-或在 [Google Colab](https://colab.research.google.com/github/mujocolab/mjlab/blob/main/notebooks/demo.ipynb) 中尝试（无需本地环境）。
-
-**从源码安装：**
-
-```bash
-git clone https://github.com/mujocolab/mjlab.git && cd mjlab
-uv run demo
-```
-
-其他安装方式（PyPI、Docker）见[安装指南](https://mujocolab.github.io/mjlab/source/installation.html)。
-
-## 训练示例
-
-### 1. 速度跟踪
-
-在平地上训练 Unitree G1 人形机器人跟踪速度指令：
-
-```bash
-uv run train Mjlab-Velocity-Flat-Unitree-G1 --env.scene.num-envs 4096
-```
-
-**多 GPU 训练：** 使用 `--gpu-ids` 扩展到多块 GPU：
-
-```bash
-uv run train Mjlab-Velocity-Flat-Unitree-G1 \
-  --gpu-ids 0 1 \
-  --env.scene.num-envs 4096
-```
-
-详见[分布式训练指南](https://mujocolab.github.io/mjlab/source/distributed_training.html)。
-
-训练期间评估策略（从 Weights & Biases 拉取最新 checkpoint）：
-
-```bash
-uv run play Mjlab-Velocity-Flat-Unitree-G1 --wandb-run-path your-org/mjlab/run-id
-```
-
-
 ## G1 动作跟踪
 **训练**（4096 envs、10000 轮迭代；可循环任意动作）：环境变量必须修改
 
 ```bash
 conda activate env_isaaclab
-cd /home/zju/Downloads/mjlab-dev-go2-mimic
 export PYTHONPATH=src
 ```
 ```bash
@@ -84,7 +48,8 @@ done
 ```
 
 **Resume（断点续训）**：`--agent.resume True` 恢复模型权重、优化器状态、
-迭代计数与环境步数计数器；`--agent.load-run` 是匹配
+迭代计数与环境步数计数器；若只想保留权重、让拉力等课程从 0 重开，加
+`--agent.reset-iteration True`。`--agent.load-run` 是匹配
 `logs/rsl_rl/g1_tracking/` 下 run 目录名的**正则**（按字母序取最新匹配，
 如 `.*g1_motion_long_08` → `2026-10-12_02-53-05_g1_motion_long_08`），
 省略时自动选最新 run；`--agent.load-checkpoint` 默认 `model_.*.pt` 取最新
@@ -155,7 +120,6 @@ motion）。默认先跑 RL 行走（`policies/g1_lab/policy_dwaq.pt`），viewe
 
 ```bash
 conda activate env_isaaclab
-cd /path/to/mjlab-dev-go2-mimic
 python scripts/export_g1_tracking_onnx.py
 ```
 
@@ -167,13 +131,6 @@ python scripts/sim2sim_g1_mujoco.py --list
 
 # 启动 RL；viewer 中热切换 mimic（推荐加 --match_isaac）
 python scripts/sim2sim_g1_mujoco.py --match_isaac
-python scripts/sim2sim_g1_mujoco.py --policy 88_05 --match_isaac
-
-# 直接从某个 mimic 开跑（结束后仍回 RL）
-python scripts/sim2sim_g1_mujoco.py --policy 88_05 --start_mimic --match_isaac
-
-# mimic 循环、不自动回 RL
-python scripts/sim2sim_g1_mujoco.py --policy long_01 --start_mimic --loop_mimic --match_isaac
 ```
 
 `--policy` 可以是 `--list` 里的下标、run 名子串，或 ONNX/目录路径。
@@ -189,11 +146,12 @@ root_ori 0.5），执行器已启用梯形力矩-速度包络（见下节）。�
 | :--- | :--- | :--- |
 | `Mjlab-Tracking-Flat-Unitree-G1-Dance` | 纯舞蹈跟踪 | `logs/rsl_rl/g1_dance/` |
 | `Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation` | 纯舞蹈，无状态估计（Stage-I） | 同上 |
-| `Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation-Stage-II` | Stage-II：更严终止 + 更大推力 | 同上 |
+| `Mjlab-Tracking-Flat-Unitree-G1-Dance-No-State-Estimation-Stage-II` | Dance Stage-II：更严终止 + 更大推力 | 同上 |
 | `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery` | 舞蹈 + 倒地恢复（Stage-I，z 0.25） | `logs/rsl_rl/g1_fall_recovery/` |
 | `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation` | 同上，无状态估计（Stage-I） | 同上 |
-| `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II` | 倒地恢复 Stage-II（z 0.25 + KungFu III 级推扰/RSI） | 同上 |
-
+| `Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II` | 倒地恢复 Stage-II（终止同 I，仅加大推扰/RSI） | 同上 |
+！！！可以先在舞蹈里面训练5000轮以上，学会粗跟踪，一上来就训练这个初期的奖励会很长时间的负数很难突破到正数
+，这是由于添加了几个负奖励
 纯 Dance 训练示例：
 
 ```bash
@@ -205,11 +163,10 @@ PYTHONPATH=src python -m mjlab.scripts.train \
   --agent.run-name "dance1_subject2"
 ```
 
-**Stage-II resume**（参考 KungFuAthleteBot：收紧跟踪终止 + `VELOCITY_RANGE_ADD`
-更大推扰与初始速度噪声；RSI 初始位姿/关节噪声与一阶段一致。从 Stage-I
-checkpoint 续训。`--agent.load-run` 在
-`logs/rsl_rl/g1_dance/` 下按正则取最新匹配；用 `.*_dance1_subject2$`
-避免误匹配 `..._dance1_subject2_stage2`）：
+**Dance Stage-II resume**（收紧终止 + `VELOCITY_RANGE_ADD` 推扰：去掉 z-only，
+全空间 `anchor_pos` 1.0 m、`anchor_ori` 0.6、`hip_dof` π/6。从 Stage-I
+checkpoint 续训。`--agent.load-run` 用 `.*_dance1_subject2$` 避免误匹配
+`..._stage2`）：
 
 ```bash
 conda activate env_isaaclab
@@ -293,28 +250,28 @@ python -m mjlab.scripts.play \
 
 #### 两阶段（Stage-I / Stage-II）与 KungFu 对比
 
-两阶段共享：环境分组、容忍 + 延迟窗口（2 s + 2 s）、拉力课程、爬起奖励、
-`anchor_ori` 阈值 0.8。相对 KungFuAthleteBot 的三阶段（`1307-Stage-I/II/III`）：
+两阶段共享：环境分组、容忍 + 延迟窗口（2 s + 2 s）、拉力课程、爬起奖励；
+**终止条件两阶段相同**（z 0.25 + ori 0.8）。Stage-II 只加大推扰/RSI
+（对齐 KungFu Stage-III 的 `VELOCITY_RANGE_ADD`）。
 
-| | KungFu Stage-I | KungFu Stage-II | KungFu Stage-III | 本仓库 Stage-I | 本仓库 Stage-II |
+| | KungFu I | KungFu II | KungFu III | 本仓库 I | 本仓库 II |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| 目标 | 粗跟踪 + 爬起 | 提跟踪精度 | 提鲁棒、少摔 | 粗跟踪 + 爬起 | 加大扰动、提鲁棒 |
-| 终止 z | `anchor`/`ee` **0.5** | 去掉 z-only | 同 II | `anchor_pos_z` **0.25** | **0.25**（同 I） |
-| 其他终止 | `ori` 0.8 | `ori` 0.6；全空间 `pos` 1.0；`hip_dof` π/6 | 同 II | `ori` 0.8 | `ori` 0.8（不变） |
-| 奖励 | 爬起塑形 | + CoM | 同 II | 爬起塑形 | 同 I |
-| 扰动 | 普通 push / RSI | 同 I | **加大** push / reset | 普通 push / RSI | **加大**（对齐 KungFu III） |
-| 宽容窗口 | 4 s | 4 s | 4 s | 2 s + 2 s 延迟 | 同 I |
-| 拉力课程 | 无 | 无 | 无 | **500 N** 起，每 500 iter −20 N，至 0 | 同 I |
+| 目标 | 粗跟踪 + 爬起 | 提跟踪精度 | 提鲁棒 | 粗跟踪 + 爬起 | 加大扰动 |
+| 终止 z | 0.5 | 去掉 z-only | 同 II | `z` **0.25** | **同 I** |
+| 其他终止 | `ori` 0.8 | `ori` 0.6；`pos` 1.0；`hip` π/6 | 同 II | `ori` 0.8 | **同 I** |
+| 扰动 | 普通 | 同 I | **加大** | 普通 | **加大**（KungFu III） |
+| 推荐 iter | — | — | — | 30000 | **20000** |
+| 拉力课程 | 无 | 无 | 无 | 500 N→0 | 同 I |
 
-本仓库 Stage-II 相对 Stage-I 的具体差分（z 两阶段同为 0.25，否则难训）：
+本仓库 Fall-Recovery 差分明细：
 
 | 项 | Stage-I | Stage-II |
 | :--- | :--- | :--- |
-| `anchor_pos_z` | > **0.25 m** | > **0.25 m**（同 I） |
-| `anchor_ori` | > 0.8 | > 0.8（不变） |
-| RSI `pose_range` xyz | ±0.05 / ±0.05 / ±0.01 | **±0.15 / ±0.15 / ±0.15**（KungFu III） |
-| RSI / push 速度 | `VELOCITY_RANGE` | **`VELOCITY_RANGE_ADD`**（KungFu III） |
-| 任务 ID（无状态估计） | `...Fall-Recovery-No-State-Estimation` | `...Fall-Recovery-No-State-Estimation-Stage-II` |
+| `anchor_pos_z` | > 0.25 | **同 I** |
+| `anchor_ori` | > 0.8 | **同 I** |
+| RSI `pose_range` | ±0.05/0.05/0.01 | **±0.15**（KungFu III） |
+| RSI / push 速度 | `VELOCITY_RANGE` | **`VELOCITY_RANGE_ADD`** |
+| 任务 ID 后缀 | （无） | `-Stage-II` |
 
 关键参数（`config/g1/env_cfgs.py` 中 `enable_fall_recovery=True` 分支）：
 
@@ -349,61 +306,58 @@ Fall-Recovery 任务日志独立保存到 **`logs/rsl_rl/g1_fall_recovery/`**
 
 #### 训练 / 续训 / 播放（无状态估计）
 
-以下命令均使用 **No-State-Estimation** 任务，可直接复制。先：
+以下命令均使用 **No-State-Estimation** 任务。先：
 
 ```bash
 conda activate env_isaaclab
 cd /home/zju/Downloads/mjlab-dev-go2-mimic
+export PYTHONPATH=src
+MOTION="$PWD/motions/dance1_subject2.npz"
 ```
 
-**Stage-I 训练**（z 0.25，普通扰动）：
+**一条命令跑完 Fall-Recovery 两阶段**（I: 30000 → II: 20000；
+Stage-II 自动 resume Stage-I）：
 
 ```bash
-PYTHONPATH=src python -m mjlab.scripts.train \
+conda activate env_isaaclab && cd /home/zju/Downloads/mjlab-dev-go2-mimic && \
+export PYTHONPATH=src && MOTION="$PWD/motions/dance1_subject2.npz" && \
+python -m mjlab.scripts.train \
   Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation \
-  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
-  --env.scene.num-envs 4096 \
-  --agent.max-iterations 30000 \
-  --agent.run-name "dance1_subject2_fall"
+  --env.commands.motion.motion-file "$MOTION" --env.scene.num-envs 4096 \
+  --agent.max-iterations 30000 --agent.run-name "dance1_subject2_fall" && \
+python -m mjlab.scripts.train \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II \
+  --env.commands.motion.motion-file "$MOTION" --env.scene.num-envs 4096 \
+  --agent.max-iterations 20000 --agent.run-name "dance1_subject2_fall_stage2" \
+  --agent.resume True --agent.load-run ".*dance1_subject2_fall$"
 ```
 
-**Stage-I Resume（同阶段断点续训）**：
+**分阶段单独跑**（等价拆开）：
 
 ```bash
-PYTHONPATH=src python -m mjlab.scripts.train \
+# Stage-I
+python -m mjlab.scripts.train \
   Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation \
-  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
-  --env.scene.num-envs 4096 \
-  --agent.max-iterations 30000 \
-  --agent.run-name "dance1_subject2_fall" \
-  --agent.resume True \
-  --agent.load-run ".*dance1_subject2_fall"
+  --env.commands.motion.motion-file "$MOTION" --env.scene.num-envs 4096 \
+  --agent.max-iterations 30000 --agent.run-name "dance1_subject2_fall"
+
+# Stage-II（终止同 I；仅加大推扰/RSI）
+python -m mjlab.scripts.train \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II \
+  --env.commands.motion.motion-file "$MOTION" --env.scene.num-envs 4096 \
+  --agent.max-iterations 20000 --agent.run-name "dance1_subject2_fall_stage2" \
+  --agent.resume True --agent.load-run ".*dance1_subject2_fall$"
 ```
 
-**Stage-II 训练**（从 Stage-I checkpoint resume；z 仍 0.25，加大推扰/RSI）：
+**!!!!!!!!!!!!!!Stage-I 热启动但课程从 0 计!!!!!!!!!!!!**（加载权重，拉力等课程按 iter=0 重开）：
 
 ```bash
-PYTHONPATH=src python -m mjlab.scripts.train \
-  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II \
-  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
-  --env.scene.num-envs 4096 \
-  --agent.max-iterations 30000 \
-  --agent.run-name "dance1_subject2_fall_stage2" \
-  --agent.resume True \
-  --agent.load-run ".*dance1_subject2_fall"
-```
-
-**Stage-II Resume（二阶段断点续训）**：
-
-```bash
-PYTHONPATH=src python -m mjlab.scripts.train \
-  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation-Stage-II \
-  --env.commands.motion.motion-file "$PWD/motions/dance1_subject2.npz" \
-  --env.scene.num-envs 4096 \
-  --agent.max-iterations 30000 \
-  --agent.run-name "dance1_subject2_fall_stage2" \
-  --agent.resume True \
-  --agent.load-run ".*dance1_subject2_fall_stage2"
+python -m mjlab.scripts.train \
+  Mjlab-Tracking-Flat-Unitree-G1-Dance-Fall-Recovery-No-State-Estimation \
+  --env.commands.motion.motion-file "$MOTION" --env.scene.num-envs 4096 \
+  --agent.max-iterations 30000 --agent.run-name "dance1_subject2_fall" \
+  --agent.resume True --agent.load-run ".*dance1_subject2_fall$" \
+  --agent.reset-iteration True
 ```
 
 **播放 Stage-I**：
@@ -542,12 +496,13 @@ done
 - [x] 负功率限制(omnixtreme)
 - [x] 添加后空翻等极限动作
 - [x] 手部接触的力进行限制
-- [x] 手部抬到上面去
+- [x] 数据集的手部抬到上面去
 - [x] 部分低动态动作使用空翻高动态训练跟踪不好,直接二阶段resume就可以了，收紧终止条件
-- [x] 查尔斯顿舞的长序列动作(3min) 
+- [x] 查尔斯顿舞的长序列动作(2min) 
 - [x] 倒地恢复的力课程
-- [] 更高的抗扰性，地形，更强的跟踪能力(适应模块)
-- [] EX-RGMT
+- [x] 更高的抗扰性，
+- []  地形，更强的跟踪能力(适应模块)
+- []  EX-RGMT
 
 ## G1 执行器建模：梯形力矩-速度包络与非线性摩擦
 
@@ -822,18 +777,17 @@ mjlab 的诞生离不开 Isaac Lab 团队的杰出工作，其 API 设计与抽�
 
 Go2 敏捷参考动作（空翻、跳跃等）由
 [se3_trajopt](https://github.com/Renkunzhao/se3_trajopt) 生成。
-本工作的跟踪训练与演示位于
-[dev/go2-mimic](https://github.com/Renkunzhao/mjlab/tree/dev/go2-mimic)
-分支。
 
 倒地恢复与舞蹈跟踪任务还受益于以下开源工作，谨致谢意：
 
 - **[AMP_mjlab](https://github.com/yusongmin1/AMP_mjlab)**（[ccrpRepo](https://github.com/ccrpRepo)）：
   恢复窗口（延迟终止）设计，为本仓库 Fall-Recovery 的起身窗口提供了重要参考。
-- **拉力课程**（[yusongmin1](https://github.com/yusongmin1) /
-  [AMP_mjlab](https://github.com/yusongmin1/AMP_mjlab)）：
+- **[AMP_mjlab](https://github.com/yusongmin1/AMP_mjlab)**（[yusongmin1](https://github.com/yusongmin1)）：
   torso 向上拉力的课程式衰减（初始力逐步撤出），为本仓库
   `recovery_assist_force` 提供了参考。
+- **[dev/go2-mimic](https://github.com/Renkunzhao/mjlab/tree/dev/go2-mimic)**
+  （[Renkunzhao/mjlab](https://github.com/Renkunzhao/mjlab)）：
+  跟踪任务奖励系数调整，为本仓库舞蹈 / 跟踪奖励权重提供了参考。
 - **[KungFuAthleteBot](https://kungfuathletebot.github.io/)**
   （[arXiv:2602.13656](https://arxiv.org/abs/2602.13656)）：
   躺倒状态池初始化、爬起奖励塑形、多阶段收紧终止与加大扰动

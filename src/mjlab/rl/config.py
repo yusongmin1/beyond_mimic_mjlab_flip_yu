@@ -109,6 +109,13 @@ class RslRlBaseRunnerCfg:
   """The checkpoint file to load. Default is "model_.*.pt" (all). If regex expression,
   the latest (alphabetical order) matching file will be loaded.
   """
+  reset_iteration: bool = False
+  """After loading a checkpoint, zero ``current_learning_iteration`` and the
+  env ``common_step_counter`` so curricula (e.g. recovery assist force,
+  action_rate_l2) restart from iteration 0. Model / optimizer weights are
+  kept. Useful when warm-starting fall-recovery from an old high-iter run.
+  Default is False (preserve saved counters on resume).
+  """
   clip_actions: float | None = None
   """The clipping range for action values. If None (default), no clipping is applied."""
 

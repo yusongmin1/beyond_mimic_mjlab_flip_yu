@@ -161,6 +161,18 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   if resume_path is not None:
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     runner.load(str(resume_path))
+    # Warm-start weights but restart iteration / curriculum counters from 0
+    # (recovery assist force, action_rate_l2, etc.).
+    if getattr(cfg.agent, "reset_iteration", False):
+      prev_iter = int(getattr(runner, "current_learning_iteration", 0))
+      prev_steps = int(env.unwrapped.common_step_counter)
+      runner.current_learning_iteration = 0
+      env.unwrapped.common_step_counter = 0
+      print(
+        f"[INFO]: reset_iteration=True — cleared counters "
+        f"(was iter={prev_iter}, common_step_counter={prev_steps}); "
+        "curricula restart from iteration 0 (weights kept)"
+      )
 
   # Only write config files from rank 0 to avoid race conditions.
   if rank == 0:

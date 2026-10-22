@@ -183,25 +183,34 @@ class RecoveryFallenPool:
     return cls._instance
 
   def init(self, init_pos_file: str, num_diverse: int = 2048) -> None:
+    """Load base fallen pool and keep ``num_diverse`` diverse orientations.
+
+    Samples only from the diverse subset of ``robot_init_states_g1_8192.pth``
+    (default 2048). No user-recording merge.
+    """
     if not os.path.isfile(init_pos_file):
       raise FileNotFoundError(
         f"Fallen-init pool file not found: {init_pos_file}"
       )
     if self._data is not None:
       return
-    import numpy as np
 
-    data = torch.load(init_pos_file, map_location="cpu")
+    data = torch.load(init_pos_file, map_location="cpu", weights_only=False)
+    dof_all = data["dof_pos"].float()
+    root_all = data["robot_root_states_xyzw"].float()
+    quats_xyzw = root_all[:, 3:7]
+    diverse_idxs = self._select_most_diverse_quaternions(quats_xyzw, num_diverse)
+    dof = dof_all[diverse_idxs].clone()
+    root = root_all[diverse_idxs].clone()
+
     self._data = {
-      "dof_pos": data["dof_pos"].float(),
-      "robot_root_states_xyzw": data["robot_root_states_xyzw"].float(),
+      "dof_pos": dof,
+      "robot_root_states_xyzw": root,
     }
-    quats_xyzw = self._data["robot_root_states_xyzw"][:, 3:7]
-    self._diverse_idxs = self._select_most_diverse_quaternions(quats_xyzw, num_diverse)
-    n = self._data["dof_pos"].shape[0]
+    self._diverse_idxs = list(range(int(dof.shape[0])))
     print(
-      f"[recovery] Loaded fallen-init pool: {n} states ({len(self._diverse_idxs)} "
-      f"diverse) from {init_pos_file}"
+      f"[recovery] Fallen-init ready: {len(self._diverse_idxs)} diverse "
+      f"(source {init_pos_file}, raw={dof_all.shape[0]})"
     )
 
   @staticmethod

@@ -136,7 +136,8 @@ register_mjlab_task(
 # - Fall-recovery design: 60% normal / 40% recovery (recovery_env_ratio=0.4);
 #   with fallen_init_ratio=1.0 the whole recovery group starts from the
 #   fallen-state pool (delayed termination + upward assist, AMP style).
-# - Fall-Recovery: both stages use z 0.25 m. Stage-I baseline push/RSI;
-#   Stage-II adds KungFu Stage-III-style VELOCITY_RANGE_ADD push and
-#   larger RSI pose/velocity. Windows (2s tolerant + 2s delayed) shared.
+# - Fall-Recovery two stages (same terminations both):
+#   Stage-I: z 0.25 + ori 0.8, baseline push/RSI
+#   Stage-II: same terms + KungFu-III VELOCITY_RANGE_ADD / larger RSI
+#   Windows (2s tolerant + 2s delayed) shared.
 # - Fall-Recovery logs go to logs/rsl_rl/g1_fall_recovery/.
